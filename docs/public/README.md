@@ -61,33 +61,26 @@ before any grounded edit is exported.
 
 ## Recently shipped
 
-- **Incremental corpus projections and rational timecode** — unchanged
-  workspaces are fingerprint-skipped on rebuilds (salts derive from renderer
-  source digests), a shared per-workspace audio cache feeds
-  transcription/diarization/audio events, and EDL/FCPXML/OTIO exports count
-  frames at the exact rational rate (29.97 no longer drifts ~3.6 s/hour).
-- **Captions-first ingest** — when the source ships a caption track, ingest
-  reuses it instead of re-transcribing the audio.
-- **Silent-stall transcription guard** — a coverage check against VAD-detected
-  speech catches faster-whisper's nondeterministic mid-video stalls and
-  re-transcribes once with safer settings; see the
-  [case study](#case-study-a-silent-transcription-stall).
-- **All-on runtime with a policy layer** — every capability installs by
-  default; `va runtime` inspects and switches ASR backend, clip encoder, and
-  feature toggles without reinstalling. Includes an MLX ASR adapter for Apple
-  Silicon in the `low-power` profile.
-- **Redesigned corpus browser** — `va view` now ships a dark-first library
-  with search, sortable density tables, a hand-rolled canvas relation graph,
-  and a sticky two-column workspace player; see
-  [What it looks like](#what-it-looks-like).
-- **Named workflows** — the four everyday command chains carry plain names
-  in the Agent Skill (Import, Search, Cut, Archive); see [Usage](#usage).
+- **Legacy workspaces promote in place** — `va rebind` backfills pre-0.3.0
+  workspaces into revision binding (dry-run by default) and refuses when the
+  source is gone, so frozen corpora accept new evidence again.
+- **Procedures compile into skill drafts** — recurring, visually grounded
+  `task-*` steps become approval-pending skill drafts gated on tool-consensus
+  intent coherence; `va skillgen --route` names what still blocks each
+  candidate.
+- **Beat-quantized rhythm editing** — `va beats` extracts a beat grid from a
+  music track and `va beat-eval` gates sequence joins against it
+  (p90 offset <= 40 ms), with a ledger-preserving snap proposal.
+- **Story Map** — both ledgers projected onto one proportional timeline with
+  grounding cross-highlight, a cut-provenance lane and speaker ribbons.
+- **Persistent BM25 search index** — fingerprint-incremental FTS5 with hybrid
+  Korean recall and RRF-routed ranking.
 - **Experimental Windows support** — the workspace lock has an `msvcrt`
   fallback and CI runs a Windows smoke job; see
   [Requirements](#requirements).
 
 All shipped to `main`. The current release is
-[v0.3.0](https://github.com/mupozg823/timecode-agent/releases/tag/v0.3.0);
+[v0.4.0](https://github.com/mupozg823/timecode-agent/releases/tag/v0.4.0);
 [v0.1.0](https://github.com/mupozg823/timecode-agent/releases/tag/v0.1.0) was
 the first.
 
