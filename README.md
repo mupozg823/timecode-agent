@@ -321,9 +321,10 @@ image provenance, and sequences; create a fresh ingest workspace before adding
 evidence. A new draft created directly through the current Python API binds its
 source, transcript, and timing on the first evidence write.
 
-`va search "<terms>"` builds an on-demand FTS5 view across workspace
-transcripts, checkpoints, and OCR. `va view` writes a self-contained static
-corpus browser. `va wiki` projects entities, relations, quotes, and scene
+`va search "<terms>"` queries a persistent FTS5 index (word and trigram
+retrievers fused per source family) across workspace transcripts,
+checkpoints, and OCR, synced incrementally per workspace fingerprint.
+`va view` writes a self-contained static corpus browser. `va wiki` projects entities, relations, quotes, and scene
 notes into Markdown. No vector database is the source of truth.
 
 `va index`, `va view`, and `va wiki` accept one corpus root, or workspace
@@ -343,10 +344,10 @@ through an exclusive lease on the existing workspace-directory inode.
 
 | Family | Commands |
 |---|---|
-| Ingest and corpus | `ingest` `glossary` `audit` `search` `index` `view` `wiki` `bridge` `gc` |
+| Ingest and corpus | `ingest` `glossary` `audit` `rebind` `search` `index` `view` `wiki` `skillgen` `bridge` `gc` |
 | Placement and inspection | `brief` `capture` `keyframes` `audioevents` `diarize` `faces` `ocr` `filmstrip` `highlights` `scenes` |
-| Understanding state | `checkpoint add/list` `status` |
-| Editing and delivery | `sequence add/list` `boundary-eval` `clip` `export` `reframe` |
+| Understanding state | `checkpoint add/list/observe` `ask` `status` |
+| Editing and delivery | `sequence add/list` `boundary-eval` `beats` `beat-eval` `clip` `export` `reframe` |
 | Runtime and configuration | `runtime` |
 
 The same CLI is available as `va` and `tca`.
@@ -363,9 +364,44 @@ A few commands are worth a direct mention beyond the table above:
   backend. Run it before recording checkpoints or other transcript-dependent
   evidence: it advances the transcript revision, and is refused once such
   evidence exists.
+- `va checkpoint observe <workspace> --id <id> --frame <frames/...jpg>
+  --subject "seated man" --state present|absent|uncertain --hypothesis "..."`
+  records one query-selected, provenance-tracked, uncropped frame as a typed
+  `person_presence` checkpoint. The command derives the observation timestamp
+  and matching `visual_evidence` path from that frame. Use `uncertain` whenever
+  the frame does not resolve presence; it remains a hypothesized observation.
+- `va ask <workspace> "how many times did the seated man leave the screen?"`
+  accepts narrow English and natural Korean variants of that one event-count
+  intent. Its deterministic reader consumes typed `person_presence`
+  observations and current, provenance-tracked full-resolution frames. It
+  reports verified departures separately from uncertain intervals; ambiguous
+  subjects, actions, or count requests fail with a specific diagnostic.
+  Default `--format human --lang auto` renders Korean questions in Korean and
+  English questions in English; `--lang ko|en` overrides detection.
+  `--format agent-json` projects the same once-calculated envelope as compact
+  JSON with English identifiers and reason codes. It preserves a normalized
+  `reply_locale` (for example, `ja-JP` becomes `ja`) so a host LLM can localize
+  without parsing human prose. The CLI itself neither invokes an LLM nor
+  translates. `va ask` is read-only and never appends or rewrites checkpoint
+  or image provenance. Missing evidence is not a zero count or proof.
+
+```bash
+va ask va-out/clip "앉아 있던 남자가 화면 밖으로 몇 번 나갔나요?"
+va ask va-out/clip "how many times did the seated man leave the screen?" --lang en
+va ask va-out/clip "how many times did the seated man leave the screen?" \
+  --format agent-json --lang ja-JP
+```
+
+```json
+{"v":1,"intent":"person_exit_count","subject":"seated_man","reply_locale":"ja","status":"partial","count":1,"verified":[{"from_ms":12000,"to_ms":18000,"evidence":["frames/frame-000012.000.jpg","frames/frame-000018.000.jpg"]}],"uncertain":[{"from_ms":0,"to_ms":12000,"code":"UNOBSERVED_PREFIX"},{"from_ms":18000,"to_ms":30000,"code":"UNOBSERVED_SUFFIX"}],"next_ms":[6000,24000]}
+```
 - `boundary-eval` scores a recorded sequence's cut points and joins
   (speech-cut, breath, loudness step) so an edit can be re-snapped before
   export instead of after review.
+- `beats` extracts a fixed-tempo beat grid (beats.json) from a music track;
+  `beat-eval` gates a sequence's output-timeline joins against it
+  (p90 offset <= 40ms), and `--snap` prints a span proposal that lands
+  every join on a beat.
 
 ### Options reference
 
@@ -388,7 +424,7 @@ the argparse or effective runtime defaults, not documentation guesses.
 | `ingest` | `--signals` | off | also compute highlights + scenes and print the brief (one-call session start) |
 | `glossary` | `workspaces` (positional) | prints current status | workspaces to update; omit to just view |
 | `glossary` | `--all` | off | collect corrections from every workspace under `./va-out` |
-| `audit`, `search`, `index`, `view`, `wiki` | `roots` (positional) | `./va-out` | one corpus root, or workspaces sharing one explicit common root |
+| `audit`, `search`, `index`, `view`, `wiki`, `skillgen` | `roots` (positional) | `./va-out` | one corpus root, or workspaces sharing one explicit common root |
 | `search` | `query` (positional) | required | space-separated terms, prefix-matched |
 | `search` | `--top` | `10` | max results |
 | `index` | `--graph-reset` | off (created only if absent) | overwrite Obsidian's `.obsidian/graph.json` display preset with the shipped defaults |
@@ -445,6 +481,10 @@ the argparse or effective runtime defaults, not documentation guesses.
 |---|---|---|---|
 | `checkpoint add` | `--json` / `--json-file` | — | checkpoint object as a JSON string / file path (`-` for stdin) |
 | `checkpoint add` | `--id` / `--span` / `--status` / `--hypothesis` / `--confidence` / `--segments` / `--visual-evidence` / `--note` | — | build the checkpoint from flags instead of JSON; mixing the two input paths is rejected, including an explicitly empty value |
+| `checkpoint observe` | `--id` / `--frame` / `--subject` / `--state` / `--hypothesis` | required | bind one tracked, uncropped point frame to a typed `person_presence` checkpoint; unresolved frames use `uncertain` and stay hypothesized |
+| `ask` | `workspace`, `question` (positional) | required | narrow, read-only seated-person screen-departure count from structured checkpoint observations and tracked timestamped frames |
+| `ask` | `--lang` | `auto` | infer `ko` from a Korean question and otherwise `en`, or normalize an explicit BCP-47 primary language tag; direct human rendering supports `ko` and `en` |
+| `ask` | `--format` | `human` | localized human text, or compact `agent-json` with English identifiers and `reply_locale` for host-LLM localization |
 | `checkpoint list`, `status` | `--json` | off | machine-readable output |
 
 </details>
@@ -459,6 +499,13 @@ the argparse or effective runtime defaults, not documentation guesses.
 | `boundary-eval` | `-t` (repeatable) | — | ad-hoc cut points to score |
 | `boundary-eval` | `--sequence` | — | score a recorded sequence's cuts and joins |
 | `boundary-eval` | `--window` | `0.4` | audio window around each boundary, seconds |
+| `beats` | `--seconds` | full length | analyze only the leading N seconds |
+| `beats` | `--out` | `<media>.beats.json` | beat-grid artifact path |
+| `beat-eval` | `--beats` | required | beats.json produced by `va beats` |
+| `beat-eval` | `--sequence` | required | sequence id to gate |
+| `beat-eval` | `--gate-ms` | `40` | p90 join-to-beat tolerance, ms |
+| `beat-eval` | `--snap` | off | print a beat-snapped span proposal |
+| `skillgen` | `--route` | off | per-task gate status without compiling |
 | `clip` | `--start`, `--end` | required | clip boundaries |
 | `clip` | `-o`, `--output` | — | filename inside `clips/` |
 | `clip` | `--accurate` | off (stream copy) | re-encode for exact boundaries |
@@ -553,9 +600,11 @@ which is exactly the uploader-caption path: read `transcript_source`
 - `yt-dlp` for URL ingest
 - A coding-agent harness that can discover the included Agent Skill
 - Interface language: mixed. Most `--help` text is English, while diagnostics,
-  the `va brief`/`va status` summaries, and the `va view` UI are Korean, and no
-  locale switch exists. Ledgers and handoffs speak whatever language you write
-  into them; see [Notes](#notes).
+  the `va brief`/`va status` summaries, and the `va view` UI are Korean; no
+  global locale switch exists. The narrow `va ask` surface is the exception:
+  deterministic human output supports Korean and English, while `agent-json`
+  carries other reply locales to the host LLM. Ledgers and handoffs speak
+  whatever language you write into them; see [Notes](#notes).
 - Windows is experimental: the core CLI, ledgers, and workspace locking run
   (shared locks degrade to exclusive via `msvcrt`), a CI smoke job exercises
   install → import → lock round-trip → CLI startup, and the Apple-backed
@@ -763,7 +812,11 @@ fixtures, not a source of performance claims either.
 
 - Language is mixed, and handoffs inherit yours. Roughly two thirds of the
   `--help` strings are English, while diagnostics, the `va brief`/`va status`
-  summaries, and the `va view` UI are Korean; no locale switch is implemented.
+  summaries, and the `va view` UI are Korean; no global locale switch is
+  implemented. `va ask` alone has a narrow dual surface: direct human output
+  follows Korean-versus-English question detection (or `--lang ko|en`), while
+  compact `agent-json` preserves another requested reply locale for the host
+  LLM. It does not perform translation itself.
   Timestamps and structural fields are language-neutral, but prose is not:
   `srt` carries transcript text, `md` renders checkpoint hypotheses, and
   `edl`/`xml`/`fcpxml`/`otio` embed the checkpoint `situation` or `hypothesis`

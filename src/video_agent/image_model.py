@@ -29,6 +29,11 @@ from .workspace import Workspace
 
 PROVENANCE_SCHEMA: Final = 1
 _IMAGE_ID_RE = re.compile(r"^img-[0-9a-f]{16}$")
+# 파일명이 실어 나르는 밀리초는 반올림된 값이라 미디어 끝을 아주 조금 넘을
+# 수 있다. 그 폭까지만 끝에 맞춘다 — revision_backfill의 원장 클램프와 같은
+# 정책이며, 그 이상은 반올림이 아니라 불일치이므로 그대로 거부한다.
+_DERIVED_SPAN_CLAMP_SECONDS: Final = 5.0
+_DERIVED_SPAN_CLAMP_RATIO: Final = 0.01
 _KNOWN_INPUT_KEYS: Final = {
     "schema", "path", "file", "kind", "image_id", "cause_id",
     "cause_type", "edge_id", "reason", "source", "t", "span",
@@ -154,6 +159,31 @@ def _parse_metadata(
     return values
 
 
+def _clamp_derived_span(ws: Workspace, span: object) -> object:
+    """파일명에서 유도한 구간만 미디어 끝에 맞춘다.
+
+    필름스트립은 자기 파일명에 구간 끝을 밀리초로 반올림해 적는다. 그래서
+    영상 길이가 114.427937초일 때 이름은 `…_000114428`이 되고, 그 63마이크로초
+    때문에 워크스페이스 전체가 결박되지 못한다. 원장이 명시한 구간은 손대지
+    않는다 — 그쪽 불일치는 증거의 문제이지 이름의 문제가 아니다.
+    """
+    if not isinstance(span, (list, tuple)) or len(span) != 2:
+        return span
+    try:
+        duration = float(ws.manifest.get("duration") or 0.0)
+        start, end = float(span[0]), float(span[1])
+    except (TypeError, ValueError):
+        return span
+    if duration <= 0 or end <= duration or start >= duration:
+        return span
+    ceiling = max(
+        _DERIVED_SPAN_CLAMP_SECONDS, duration * _DERIVED_SPAN_CLAMP_RATIO
+    )
+    if end - duration > ceiling:
+        return span
+    return [start, duration]
+
+
 def normalize_event(
     ws: Workspace,
     raw: Mapping[str, object],
@@ -173,9 +203,14 @@ def normalize_event(
     values = _parse_metadata(raw, image_path)
     canonical_span = None
     if "span" in values:
+        span_input = values["span"]
+        # inventory는 디스크 스캔이라 raw의 구간도 파일명에서 풀어낸 값이다
+        # (`load_image_records`가 `filename_metadata`를 그대로 펼쳐 넣는다).
+        if "span" not in raw or source == "inventory":
+            span_input = _clamp_derived_span(ws, span_input)
         projected, canonical_span = canonicalize_span(
             ws,
-            values["span"],
+            span_input,
             raw.get("temporal_span"),
         )
         values["span"] = projected

@@ -1,10 +1,10 @@
 # Batch ingest dispatch contract
 
-Use this contract for three or more videos when the current harness can run independent workers. Parallelize only ingest and deterministic signal extraction; keep hypothesis formation, visual verification, checkpoint writes, and final selection in the main agent so judgments remain consistent.
+Use for three or more videos when the harness can run independent workers. Parallelize only ingest and deterministic signal extraction; hypothesis formation, visual verification, checkpoint writes, and final selection stay in the main agent so judgments remain consistent.
 
-- Codex: use the available multi-agent/subagent tool with one video per worker.
-- Claude Code: use the Agent tool, or the repository's `.claude/workflows/tca-batch-ingest.js` adapter.
-- No worker tool: run the same contract sequentially in the main agent.
+- Codex: one video per multi-agent worker.
+- Claude Code: the Agent tool or `.claude/workflows/tca-batch-ingest.js`.
+- No worker tool: run it sequentially in the main agent.
 
 ## Worker prompt
 
@@ -15,8 +15,7 @@ Ingest one video, extract signals, and return its brief. Do not interpret it.
 [scope]
 source: {video_path_or_url}
 workspace: {absolute_workspace}
-  # URLs require -o for a stable resume path. Local files default to
-  # CWD/va-out/<stem>.
+  # URLs require -o (stable resume path); local files default CWD/va-out/<stem>.
 commands:
   - If {ws}/manifest.json exists, never re-ingest; run only `va brief {ws}`.
   - Otherwise run `va ingest "{video}" --model small --signals [-o {ws}]`.
@@ -37,4 +36,4 @@ commands:
  "error": null | "<observed failure from stderr; no guesses>"}
 ```
 
-The main agent uses the returned `brief_text` values to prioritize videos, then resumes each analysis with `va brief <ws>`.
+The main agent prioritizes videos from the returned `brief_text`, then resumes each with `va brief <ws>`.

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import stat
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from enum import StrEnum, unique
 from pathlib import Path
+from typing import TypedDict
 
+from .checkpoint_schema import CheckpointObject
 from .revision import (
     RevisionBindingError,
     bind_record_to_workspace,
@@ -27,6 +31,20 @@ from .sequence_schema import (
 from .temporal import TemporalSpanError, canonicalize_span
 from .workspace import Workspace
 from .workspace_lock import stable_workspace_lock
+
+
+@unique
+class SequenceSourceState(StrEnum):
+    ABSENT = "absent"
+    READY = "ready"
+    PRESENT_WITHOUT_VALID_RECORDS = "present_without_valid_records"
+    UNREADABLE = "unreadable"
+
+
+class SequenceReadSnapshot(TypedDict):
+    sequences: list[dict]
+    checkpoints_by_id: dict[str, CheckpointObject]
+    sequence_source_state: SequenceSourceState
 
 
 def sequences_path(ws: Workspace) -> Path:
@@ -238,6 +256,43 @@ def _load_sequences_unlocked(
                 file=sys.stderr,
             )
     return list(latest.values())
+
+
+def load_sequence_read_snapshot(ws: Workspace) -> SequenceReadSnapshot:
+    """Read sequence decisions and their checkpoint grounding atomically."""
+    with _sequence_lock(ws, exclusive=False):
+        with checkpoint_grounding_snapshot(ws) as grounding:
+            checkpoints_by_id, _unsupported_ids = grounding
+            path = sequences_path(ws)
+            try:
+                source_stat = path.stat()
+            except FileNotFoundError:
+                sequences: list[dict] = []
+                source_state = SequenceSourceState.ABSENT
+            except OSError:
+                sequences = []
+                source_state = SequenceSourceState.UNREADABLE
+            else:
+                if not stat.S_ISREG(source_stat.st_mode):
+                    sequences = []
+                    source_state = SequenceSourceState.UNREADABLE
+                else:
+                    try:
+                        sequences = _load_sequences_unlocked(ws, grounding)
+                    except OSError:
+                        sequences = []
+                        source_state = SequenceSourceState.UNREADABLE
+                    else:
+                        source_state = (
+                            SequenceSourceState.READY
+                            if sequences
+                            else SequenceSourceState.PRESENT_WITHOUT_VALID_RECORDS
+                        )
+            return {
+                "sequences": sequences,
+                "checkpoints_by_id": dict(checkpoints_by_id),
+                "sequence_source_state": source_state,
+            }
 
 
 def load_sequences(ws: Workspace) -> list[dict]:

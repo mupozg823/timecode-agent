@@ -53,11 +53,24 @@ def _promotable_entries_from_entries(
 
 def promotable_checkpoints(ws: Workspace) -> list[CheckpointObject]:
     """Return terminal checkpoints whose declared support currently resolves."""
-    entries = _promotable_entries(ws)
-    snapshot = _verification_snapshot_from_entries(ws, entries)
+    return promotable_checkpoints_from_entries(
+        ws, _load_checkpoint_entries(ws)
+    )
+
+
+def promotable_checkpoints_from_entries(
+    ws: Workspace, entries: CheckpointEntries
+) -> list[CheckpointObject]:
+    """호출자가 이미 읽은 원장 스냅샷에서 promotability를 계산한다.
+
+    원장을 재판독하면 동시 기입과 스냅샷이 갈라진다 — 낡은 표본이 새
+    리비전의 결박으로 승격되는 경합을 여기서 차단한다.
+    """
+    promotable = _promotable_entries_from_entries(entries)
+    snapshot = _verification_snapshot_from_entries(ws, promotable)
     return [
         checkpoint
-        for validated, checkpoint in entries
+        for validated, checkpoint in promotable
         if validated.checkpoint_id in snapshot.supported_checkpoint_ids
     ]
 
@@ -119,7 +132,10 @@ def _verification_audit_from_entries(
 
 
 def _verification_snapshot_from_entries(
-    ws: Workspace, entries: CheckpointEntries
+    ws: Workspace,
+    entries: CheckpointEntries,
+    *,
+    transcript_index: TranscriptSegmentIndex | None = None,
 ) -> VerificationSnapshot:
     entries = _promotable_entries_from_entries(entries)
     issues: list[VerificationIssue] = []
@@ -127,7 +143,6 @@ def _verification_snapshot_from_entries(
     checkpoint_levels: list[CheckpointVerificationLevels] = []
     supported_count = 0
     supported_checkpoint_ids: set[str] = set()
-    transcript_index: TranscriptSegmentIndex | None = None
     records_by_path: dict[str, ImageRecord] | None = None
     resolved_visuals: dict[str, tuple[str, Path] | None] = {}
 

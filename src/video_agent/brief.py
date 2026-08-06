@@ -235,6 +235,30 @@ def recommend_mode(m, segs, speech, sc, hl, ocr_t):
                     "시각 검증만 보강", rationale)
         return ("무발화 — scenes→필름스트립→균등 캡처, "
                 "자막 보이면 ocr --every 스캔", rationale)
+    # 혼합형: 전체 발화율이 높아도 긴 무발화 스트레치가 숨어 있으면 그
+    # 구간의 온스크린 캡션·실작업 지식이 통째로 소실된다(2026-08-04 실측:
+    # 발화 51% 튜토리얼의 18.7분 타임랩스를 체크포인트 1개로 덮음).
+    # OCR 조기 반환보다 먼저 판정한다 — 표적 OCR 1건이 게이트를 우회하면
+    # 정확히 그 한-체크포인트 실패가 재발한다(PR #100 리뷰).
+    longest_gap, cursor = 0.0, 0.0
+    for seg in sorted(segs, key=lambda s: s.get("start", 0.0)):
+        start = float(seg.get("start", 0.0))
+        longest_gap = max(longest_gap, start - cursor)
+        cursor = max(cursor, float(seg.get("end", start)))
+    longest_gap = max(longest_gap, duration - cursor)
+    if ratio >= 0.35 and longest_gap >= 120.0:
+        rationale += f" · 무발화 최장 {longest_gap / 60:.0f}m"
+        coverage = m.get("transcript_coverage")
+        if isinstance(coverage, (int, float)) and coverage < 0.5:
+            # 붕괴한 전사의 구멍은 침묵이 아니다 — 시각 주도로 단정하지
+            # 말고 미해소 상태를 공개한다(toolbox 전사 신뢰 규약).
+            rationale += f" · transcript_coverage {coverage:.2f}"
+            return ("발화 주도(혼합형?) — 무발화 구간이 전사 붕괴 구멍일 수 "
+                    "있음: 전사 신뢰(coverage·repair)부터 점검하고 판정",
+                    rationale)
+        return ("발화 주도(혼합형) — 전사 패턴 우선하되, 긴 무발화 구간은 "
+                "시각 주도로 분리(필름스트립 조망+온스크린 캡처·OCR 스윕)",
+                rationale)
     if ratio >= 0.35 and ocr_t:
         return ("텍스트-온-스크린 후보 — OCR로 ASR 오인식 교정, "
                 "자막↔내레이션 1:1 여부는 직접 확정", rationale)

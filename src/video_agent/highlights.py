@@ -113,7 +113,7 @@ def compute_highlights(
     else:
         # 의도적으로 오디오 캐시를 쓰지 않는다: 캐시 wav는 -ac 1 모노
         # 다운믹스라 역위상·채널 국지 버스트가 감쇠돼, 캐시 유무에 따라
-        # 하이라이트가 달라진다(리뷰 2026-07-26). 원본 채널 레이아웃의
+        # 하이라이트가 달라진다. 원본 채널 레이아웃의
         # RMS가 결정적 정본이다.
         spans = detect_highlights(rms_windows(ws.video, window), top=top)
     write_text_atomic(ws.root / "highlights.json",

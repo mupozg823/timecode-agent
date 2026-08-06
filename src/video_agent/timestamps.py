@@ -43,6 +43,15 @@ def fmt_ts_compact(t: float) -> str:
     return rest if hours == "00" else f"{int(hours)}:{rest}"
 
 
+def fmt_ts_label(t: float) -> str:
+    """표시용 라벨: 밀리초가 000이면 잘라 읽기 소음을 줄인다.
+
+    한 페이지에 렌더러가 여럿 실리므로 트리밍 규칙은 여기 한 곳이다 —
+    렌더러별 재구현은 같은 컷의 시간 표기를 섹션마다 갈라놓는다.
+    """
+    return fmt_ts_compact(t).removesuffix(".000")
+
+
 def frame_name(t: float) -> str:
     """Cache filename for a frame at t seconds: t{ms:09d}.jpg."""
     return f"t{round(t * 1000):09d}.jpg"

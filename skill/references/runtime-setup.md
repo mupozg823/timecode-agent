@@ -13,10 +13,10 @@ or cache placement is relevant. `SKILL.md` owns the preflight checks.
 
 ## Prepare backends
 
-The default package includes faster-whisper, Apple Silicon MLX Whisper, OCR,
-Sound Analysis, sherpa, and OTIO. The `diarize` extra adds pyannote.
-`va runtime prepare` downloads ungated default models. Only remote pyannote
-models require an account token and accepted terms; sherpa works without them.
+The default package bundles faster-whisper, MLX Whisper (Apple Silicon), OCR,
+Sound Analysis, sherpa, and OTIO; the `diarize` extra adds pyannote.
+`va runtime prepare` downloads ungated default models — only remote pyannote
+needs an account token and accepted terms.
 
 **An import failure on a supported platform is an incomplete install, not an
 optional-feature signal.** Repair from the same distribution; do not degrade.

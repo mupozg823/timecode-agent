@@ -553,6 +553,13 @@ def build_index(
                     if r["head"]
                     else ""
                 )
+                if not r["has_log"]:
+                    # 미분석(체크포인트 0) 멤버는 씬 로그가 없다 — 최상위
+                    # 인덱스의 미분석 목록과 같은 계약으로, 없는 파일에
+                    # 링크를 걸지 않는다.
+                    glines.append(
+                        f"- {shown} · 미분석 — `va brief`로 착수")
+                    continue
                 glines.append(
                     f"- [{shown}]({md_target(f'{inner}/{r['doc_stem']}.md')})"
                     f" · {status}"

@@ -9,10 +9,10 @@ tools, and `wiki-schema.md` owns labels.
 - If `<ws>/manifest.json` exists, resume with `va brief <ws>`; never re-ingest.
 - For scene recall, run `va search "<query>"` before walking workspaces.
   `hypothesized` search hits are navigation hints, not answer evidence.
-- End sessions with `va index` to rebuild `va-out/INDEX.md`, scene logs, and
-  group hubs. Start the next session from `INDEX.md`.
-- `va view` HTML is derived from Markdown ledgers. Deleting it does not damage
-  source data; it falls back when media has been cleaned.
+- End sessions with `va index` (rebuilds INDEX, scene logs, group hubs);
+  start the next session from `INDEX.md`.
+- `va view` HTML derives from Markdown ledgers — safe to delete; it falls
+  back when media has been cleaned.
 
 ## Transcript corrections and glossary
 
@@ -24,22 +24,27 @@ Write `<ws>/corrections.jsonl` only after visual evidence proves an ASR error.
 
 - Prefix non-correction annotations in `corrected` with `(` so their words
   cannot enter hotwords.
-- Glossary candidates are proper nouns, domain terms, and channel spelling
-  conventions. Keep common-word corrections local to the video.
+- Glossary candidates: proper nouns, domain terms, channel spellings.
+  Common-word corrections stay local to the video.
 - At session end run `va glossary --all` or `va glossary <ws>...`.
   Inject video-local terms with `va ingest --hotwords "용어1 용어2"`.
-- Consider fine-tuning only after the same error recurs at least three times
-  and hotwords still fail. Never inject the entire glossary into every video.
+- Fine-tune only after the same error recurs 3+ times despite hotwords.
+  Never inject the entire glossary into every video.
 
-## Wiki promotion
+## Wiki promotion and skill routing
 
 - End sessions with `va index && va wiki`.
 - Promote only `verified`/`corrected` checkpoints with currently resolvable
   visual or transcript support into the active semantic layer.
-- Preserved prose outside ledgers is an input to regeneration. Never discard
-  wiki `tca:notes` or scene-log narrative blocks.
+- Preserved prose is regeneration input — never discard wiki `tca:notes` or
+  scene-log narrative blocks.
 - Follow [wiki schema](wiki-schema.md) for labels, relations, narratives, and
   index-first queries.
+- `va skillgen` compiles recurring (3+ videos), visually grounded,
+  intent-coherent procedures into approval-pending drafts under
+  `wiki/skills/` (inactive until a human approves). `--route` reports per
+  task which gate still blocks (`blocked-intent` names off-domain sources
+  to retag or split).
 
 ## Batch
 

@@ -10,7 +10,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Final
+from typing import Final, assert_never
 
 from .fsio import write_text_atomic
 from .timestamps import parse_ts
@@ -62,8 +62,37 @@ def cmd_brief(args) -> int:
     return 0
 
 
+def cmd_ask(args) -> int:
+    from .ask import answer_question
+    from .ask_render import render_report
+    from .ask_serialization import envelope_to_payload
+    from .cli_ask_parser import AskOutputFormat
+
+    report = answer_question(
+        _ws(args.workspace),
+        args.question,
+        reply_locale=args.lang,
+    )
+    output_format: AskOutputFormat = args.format
+    match output_format:
+        case AskOutputFormat.HUMAN:
+            print(render_report(report))
+        case AskOutputFormat.AGENT_JSON:
+            print(
+                json.dumps(
+                    envelope_to_payload(report),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        case unreachable:
+            assert_never(unreachable)
+    return 0
+
+
 def cmd_capture(args) -> int:
     from .capture import capture_frames, capture_sharpest
+    from .image_index import image_index_consistency, image_index_is_stale
 
     ws = _ws(args.workspace)
     ts = [parse_ts(t) for t in args.t]
@@ -76,6 +105,18 @@ def cmd_capture(args) -> int:
         paths = capture_frames(ws, ts, crop=args.crop, reason=args.reason)
     for p in paths:
         print(p)
+    # 촬영은 원장에만 append하고 투영은 `va index`/`va view`가 따로 렌더한다.
+    # 그 사이 스틸은 원장에 정상 기록된 채 사람이 읽는 인덱스에서만 빠지고,
+    # 아무 표면도 그 차이를 말하지 않았다 — 실측 코퍼스에서 13장 중 2장이
+    # 이렇게 미발행으로 남았다(2026-08-05). 여기서 한 줄로 닫는다.
+    row = image_index_consistency(ws)
+    if row["doc_present"] and image_index_is_stale(row):
+        print(
+            f"주의: 이미지 인덱스가 원장보다 {row['catalog'] - row['indexed']}장 "
+            f"뒤처졌습니다(원장 {row['catalog']} · 인덱스 {row['indexed']}) — "
+            "`va index <코퍼스 루트>`로 재발행하십시오",
+            file=sys.stderr,
+        )
     return 0
 
 
@@ -162,6 +203,60 @@ def cmd_boundary_eval(args) -> int:
             f"ssim={join['ssim'] if join['ssim'] is not None else '-'}"
         )
     return 0
+
+
+def cmd_beat_eval(args) -> int:
+    """조인-비트 오프셋 게이트 — 통과 0, p90 초과 1을 돌려준다."""
+    from .beat_audit import (
+        beat_alignment_report,
+        sequence_cuts,
+        snap_proposal,
+    )
+    from .beats import load_beats_json
+
+    ws = _ws(args.workspace)
+    grid = load_beats_json(Path(args.beats))
+    cuts = sequence_cuts(ws, args.sequence)
+    report = beat_alignment_report(
+        args.sequence, cuts, grid, gate_ms=args.gate_ms
+    )
+    snap = (
+        snap_proposal(
+            cuts, grid, duration=float(ws.manifest["duration"])
+        )
+        if args.snap else None
+    )
+    if args.as_json:
+        payload: dict[str, object] = {"report": report}
+        if snap is not None:
+            payload["snap"] = snap
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0 if report["passed"] else 1
+    for join in report["joins"]:
+        print(
+            f"join@{join['instant']:>9.3f}s  "
+            f"beat {join['nearest_beat']:>9.3f}  "
+            f"offset {join['offset_ms']:+7.1f}ms"
+        )
+    p90 = report["p90_ms"]
+    print(
+        f"p90 {p90 if p90 is not None else '-'}ms  "
+        f"gate {report['gate_ms']}ms  "
+        + ("PASS" if report["passed"] else "FAIL")
+        + ("  (조인 없음 — 단일 컷)" if not report["join_count"] else "")
+    )
+    if snap is not None:
+        for cut in snap:
+            mark = "→" if cut["snapped"] else "·"
+            reason = f"  ({cut['reason']})" if cut["reason"] else ""
+            print(
+                f"{mark} order {cut['order']}: span "
+                f"[{cut['span'][0]:.4f}, {cut['span'][1]:.4f}] "
+                f"end{cut['end_delta_s']:+.4f}s{reason}"
+            )
+        print("제안은 원장 불변 — 적용은 시퀀스 새 리비전으로, 적용 후 "
+              "boundary-eval 재판독이 전제다")
+    return 0 if report["passed"] else 1
 
 
 def cmd_filmstrip(args) -> int:
@@ -333,7 +428,7 @@ def cmd_checkpoint_add(args) -> int:
     if not raw:
         raise ValueError(CHECKPOINT_INPUT_REQUIRED_MESSAGE)
     # 파싱만 따로 감싼다 — append 중 손상된 manifest가 던지는
-    # JSONDecodeError를 페이로드 탓으로 오귀책하면 안 된다(리뷰 2026-07-26).
+    # JSONDecodeError를 페이로드 탓으로 오귀책하면 안 된다.
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError as e:
@@ -347,6 +442,25 @@ def cmd_checkpoint_add(args) -> int:
         added = append_checkpoint(ws, obj)
     except ValueError as e:
         raise ValueError(str(e) + "\n" + CHECKPOINT_SCHEMA_EXAMPLE) from None
+    print(f"checkpoint {added['id']} ({added['status']}) 기록됨")
+    return 0
+
+
+def cmd_checkpoint_observe(args) -> int:
+    from .checkpoint_schema import PersonPresenceState
+    from .person_presence import (
+        PersonPresenceJudgment,
+        record_person_presence,
+    )
+
+    judgment = PersonPresenceJudgment(
+        checkpoint_id=args.cp_id,
+        frame_ref=args.frame,
+        subject=args.subject,
+        state=PersonPresenceState(args.state),
+        hypothesis=args.hypothesis,
+    )
+    added = record_person_presence(_ws(args.workspace), judgment)
     print(f"checkpoint {added['id']} ({added['status']}) 기록됨")
     return 0
 
@@ -384,6 +498,21 @@ def cmd_checkpoint_list(args) -> int:
     return 0
 
 
+# 발동한 신호만 이름으로 보여준다 — 점수 하나로는 "왜 이게 먼저인지"가
+# 감사되지 않는다.
+_VERIFY_SIGNAL_KO = (("self_doubt", "저확신"),
+                     ("transcript_silence", "무전사"),
+                     ("asr_weakness", "ASR저신뢰"),
+                     ("speaker_shift", "화자전환"))
+
+
+def _verify_queue_entry(item) -> str:
+    flags = "·".join(label for name, label in _VERIFY_SIGNAL_KO
+                     if item["signals"][name] >= 0.5)
+    return (f"{item['id']} {item['score']:g}"
+            + (f"({flags})" if flags else ""))
+
+
 def cmd_status(args) -> int:
     from .status import workspace_status
 
@@ -405,6 +534,10 @@ def cmd_status(args) -> int:
         r = st["readiness"]
         print(f"readiness: {r['status']} (score {r['score']}) — "
               f"{r['recommendation']}")
+        queue = st["verify_queue"]
+        if queue:
+            print("verify next: " + " · ".join(
+                _verify_queue_entry(item) for item in queue))
         print(
             "evidence audit: "
             f"supported={audit['supported_count']}/{audit['terminal_count']} "

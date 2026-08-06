@@ -25,22 +25,20 @@ micro-transitions honoring ``prefers-reduced-motion``.
 
 from __future__ import annotations
 
+import base64
 import html
 import json
 from collections.abc import Sequence
 from pathlib import Path
-from typing import TypedDict
 from urllib.parse import quote
 
-from .checkpoint_schema import CheckpointObject
-from .checkpoints import load_checkpoints
 from .corpus_projection import (
     READINESS_KO,
     STATUS_KO,
     WorkspaceMeta,
+    checkpoint_anchor,
+    human_reason,
     humanize_surface,
-    speaker_labels,
-    string_values,
     ws_meta,
 )
 from .export import capture_reasons
@@ -53,8 +51,11 @@ from .projection_cache import (
     workspace_fingerprint,
 )
 from .search import corpus_root
-from .timestamps import fmt_ts_compact
+from .story_projection import StoryCheckpoint, build_story_map
+from .timestamps import fmt_ts_compact, fmt_ts_label
 from .transcript_segments import load_transcript_segments
+from .view_sequences import render_sequence_section
+from .view_story_map import STORY_MAP_CSS, STORY_MAP_JS, render_story_map
 from .workspace import Workspace
 from .workspace_discovery import find_workspaces
 
@@ -151,6 +152,18 @@ td.num{text-align:right;font-variant-numeric:tabular-nums;
 .clamp2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
  overflow:hidden}
 .empty{padding:36px 16px;text-align:center;color:var(--muted);font-size:14px}
+.seqs{margin:0 0 18px}
+.seq{border:1px solid var(--border);border-radius:10px;padding:12px;
+ margin:0 0 10px;background:var(--surface)}
+.seq-head{display:flex;gap:8px;align-items:center;margin-bottom:6px}
+.seq .intent{margin:0 0 4px;font-weight:600}
+.seq .brief,.seq .effect{margin:0 0 4px;color:var(--muted);font-size:13px}
+.seq .cuts{margin:8px 0 0;padding-left:18px}
+.seq .cut{margin:0 0 8px}
+.seq .cut-span{font-variant-numeric:tabular-nums}
+.seq .role{color:var(--muted);font-size:12px}
+.seq .note{margin:2px 0 0;font-size:13px}
+.seq .rejected{margin-top:8px;font-size:13px;color:var(--muted)}
 .media-warn{margin:0 0 10px;padding:10px 12px;border-radius:8px;
  border:1px solid var(--border-strong);background:var(--surface);
  color:var(--text);font-size:13px;line-height:1.5}
@@ -256,7 +269,7 @@ if(v){const _src=v.getAttribute('src')||'';
    +'원본을 워크스페이스 안으로 옮긴 뒤 va view를 다시 실행하십시오.';
   v.parentNode.insertBefore(_b,v);}}
 const spans=[...document.querySelectorAll('[data-span-start]')];
-const marks=[...document.querySelectorAll('.timeline button')];
+const marks=[...document.querySelectorAll('.timeline button,.story-span.seek')];
 function seekTo(t){if(!v||!isFinite(t))return;
  if(v.readyState>=1)v.currentTime=t;
  else v.addEventListener('loadedmetadata',()=>{v.currentTime=t;},
@@ -288,9 +301,12 @@ function track(t){
  if(cur&&cur!==activeEl){activeEl=cur;
   if(follow&&follow.checked)cur.scrollIntoView(
    {block:'nearest',behavior:reduced?'auto':'smooth'});}}
-if(v){v.addEventListener('timeupdate',()=>{if(raf)return;
- raf=requestAnimationFrame(()=>{raf=0;track(v.currentTime);
-  if(stop!==null&&v.currentTime>=stop){v.pause();stop=null;}});});}
+// 경계 정지는 rAF 밖에서 — 탭이 가려지면 rAF가 멈춰 정지가 영영 안
+// 걸린다(창 가림 실측). 정지는 기능이고 rAF는 시각 추적이다.
+if(v){v.addEventListener('timeupdate',()=>{
+ if(stop!==null&&v.currentTime>=stop){v.pause();stop=null;}
+ if(raf)return;
+ raf=requestAnimationFrame(()=>{raf=0;track(v.currentTime);});});}
 """.strip()
 
 # Corpus page: filter + sort + group chips + list/graph toggle + force graph.
@@ -453,7 +469,7 @@ function initGraph(){
    ctx.globalAlpha=dim?C.dim:1;
    ctx.fillStyle=n.type==='ws'?C.ws:C.ent;
    ctx.beginPath();ctx.arc(n.x,n.y,n.r,0,7);ctx.fill();}
-  ctx.font=(11/scale)+'px Pretendard,-apple-system,sans-serif';
+  ctx.font=(12/scale)+'px Pretendard,-apple-system,sans-serif';
   ctx.textAlign='center';
   ctx.lineWidth=3/scale;ctx.strokeStyle=C.halo;ctx.lineJoin='round';
   // 라벨은 그린 순서대로 자리를 잡고, 이미 놓인 라벨과 겹치면 건너뛴다.
@@ -561,24 +577,14 @@ apply();
 """.strip()
 
 
-class _ViewCheckpoint(TypedDict):
-    checkpoint_id: str
-    start: float
-    end: float
-    status: str
-    situation: str
-    speakers: list[str]
-    confidence: str
-    visual_evidence: list[str]
-
-
-def _page(title: str, body: list[str], js: str) -> str:
+def _page(title: str, body: list[str], js: str, *, extra_css: str = "") -> str:
+    style = _CSS + ("\n" + extra_css if extra_css else "")
     return "\n".join([
         "<!doctype html>", '<html lang="ko"><head><meta charset="utf-8">',
         '<meta name="viewport" content="width=device-width,initial-scale=1">',
         '<meta name="color-scheme" content="dark light">',
         f"<title>{html.escape(title)}</title>",
-        f"<style>{_CSS}</style></head><body><main>",
+        f"<style>{style}</style></head><body><main>",
         *body,
         f"</main><script>{js}</script></body></html>",
     ]) + "\n"
@@ -596,65 +602,28 @@ def _video_src(ws: Workspace) -> str | None:
         return video.resolve().as_uri()
 
 
-def _seek(s: float, e: float | None, label: str) -> str:
+def _seek(
+    s: float,
+    e: float | None,
+    label: str,
+    *,
+    enabled: bool,
+) -> str:
+    """미디어가 없으면 시간을 텍스트로만 남긴다 — 죽은 seek 버튼 금지."""
+    if not enabled:
+        return f'<span class="timecode">{html.escape(label)}</span>'
     end_attr = f' data-end="{e:.2f}"' if e is not None else ""
     return (f'<button type="button" class="seek" data-start="{s:.2f}"'
             f"{end_attr}>{html.escape(label)}</button>")
 
 
-def _view_checkpoint(checkpoint: CheckpointObject) -> _ViewCheckpoint | None:
-    checkpoint_id = checkpoint.get("id")
-    status = checkpoint.get("status")
-    hypothesis = checkpoint.get("hypothesis")
-    span = checkpoint.get("span")
-    if (
-        not isinstance(checkpoint_id, str)
-        or not isinstance(status, str)
-        or not isinstance(hypothesis, str)
-        or not isinstance(span, (list, tuple))
-        or len(span) != 2
-    ):
-        return None
-    start, end = span
-    if (
-        isinstance(start, bool)
-        or not isinstance(start, (int, float))
-        or isinstance(end, bool)
-        or not isinstance(end, (int, float))
-    ):
-        return None
-    raw_situation = checkpoint.get("situation")
-    situation = (
-        raw_situation
-        if isinstance(raw_situation, str) and raw_situation
-        else hypothesis
-    )
-    raw_confidence = checkpoint.get("confidence")
-    confidence = (
-        str(raw_confidence)
-        if isinstance(raw_confidence, (int, float))
-        and not isinstance(raw_confidence, bool)
-        else "-"
-    )
-    visual_evidence = string_values(checkpoint.get("visual_evidence"))
-    return {
-        "checkpoint_id": checkpoint_id,
-        "start": float(start),
-        "end": float(end),
-        "status": status,
-        "situation": humanize_surface(situation),
-        "speakers": speaker_labels(checkpoint.get("speakers")),
-        "confidence": confidence,
-        "visual_evidence": visual_evidence,
-    }
-
-
-def _timeline(cps: list[_ViewCheckpoint], duration: float) -> str:
+def _timeline(cps: list[StoryCheckpoint], duration: float) -> str:
     """Span strip under the player — each checkpoint as a seekable block."""
     if not cps or duration <= 0:
         return ""
     blocks, cursor = [], 0.0
-    for c in sorted(cps, key=lambda c: c["start"]):
+    # 투영 계약: checkpoints는 이미 (start, end, id) 정렬로 온다 — 재정렬 불요.
+    for c in cps:
         e = min(max(c["end"], c["start"]), duration)
         s = max(c["start"], 0.0, cursor)   # 겹친 앞부분은 이미 그려진 폭
         if e <= s and cursor > 0.0:
@@ -663,8 +632,8 @@ def _timeline(cps: list[_ViewCheckpoint], duration: float) -> str:
             blocks.append(
                 f'<span style="flex:{(s - cursor) / duration:.4f}"></span>')
         share = max((e - s) / duration, 0.003)
-        label = (f"{c['checkpoint_id']} · "
-                 f"{fmt_ts_compact(s)}–{fmt_ts_compact(e)}")
+        label = (f"{c['id']} · "
+                 f"{fmt_ts_label(s)}–{fmt_ts_label(e)}")
         blocks.append(
             f'<button type="button" class="seek st-{html.escape(c["status"])}"'
             f' style="flex:{share:.4f}" data-start="{s:.2f}"'
@@ -678,17 +647,42 @@ def _timeline(cps: list[_ViewCheckpoint], duration: float) -> str:
             + "".join(blocks) + "</div>")
 
 
+# 단일 파일로 인라인할 수 있는 캡처 포맷 — 그 외는 생략으로 센다
+# (조용히 상대참조를 남기면 받은 쪽에서 깨진 이미지가 된다).
+_INLINE_IMAGE_MIME = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                      ".png": "image/png", ".webp": "image/webp",
+                      ".gif": "image/gif"}
+
+
+def _inline_image_src(resolved: Path) -> str | None:
+    mime = _INLINE_IMAGE_MIME.get(resolved.suffix.lower())
+    if mime is None:
+        return None
+    try:
+        payload = resolved.read_bytes()
+    except OSError:
+        return None
+    return f"data:{mime};base64," + base64.b64encode(payload).decode("ascii")
+
+
 def export_html(
-    ws: Workspace, *, corpus_backlink: str = "../view.html"
+    ws: Workspace, *, corpus_backlink: str = "../view.html",
+    standalone: bool = False,
 ) -> str:
-    """One static page: player + checkpoint cards + transcript + evidence."""
+    """One static page: story map + player + checkpoint cards + transcript.
+
+    ``standalone``은 파일 1개 전달용(#45): 비디오·상대참조를 빼고 캡처를
+    data URI로 인라인한다 — 정상 뷰의 상대참조·플레이어는 그대로 둔다.
+    """
     meta = ws_meta(ws)
-    src = _video_src(ws)
-    cps = [
-        view
-        for checkpoint in load_checkpoints(ws)
-        if (view := _view_checkpoint(checkpoint)) is not None
-    ]
+    src = None if standalone else _video_src(ws)
+    story = build_story_map(ws)
+    cps = story["checkpoints"]
+    media_available = src is not None
+    links = ("" if standalone else
+             f' · <a href="{ws.doc_stem}.md">글로 보기</a> · '
+             f'<a href="{html.escape(corpus_backlink, quote=True)}">'
+             "← 라이브러리</a>")
     body = [
         '<div class="topbar"><div>',
         f"<h1>{html.escape(meta['title'])}</h1>",
@@ -696,21 +690,29 @@ def export_html(
         f'{html.escape(meta["mode_head"])} · '
         f'<span class="badge {meta["readiness"]}">'
         f'{READINESS_KO.get(meta["readiness"], meta["readiness"])}</span> '
-        f'· 기록된 장면 {meta["cps"]} · <a href="{ws.doc_stem}.md">글로 보기</a> · '
-        f'<a href="{html.escape(corpus_backlink, quote=True)}">'
-        "← 라이브러리</a></p>",
+        f'· 기록된 장면 {meta["cps"]}{links}</p>',
         "</div></div>",
-        '<div class="split"><div>',
     ]
+    # 스토리 맵은 스플릿 위 — 두 원장을 한 시간축으로 조망한 뒤 상세로 간다.
+    story_html = render_story_map(story, media_available=media_available)
+    if story_html:
+        body.append(story_html)
+    body.append('<div class="split"><div>')
     if src:
         body.append('<div class="player-rail">'
                     f'<video controls preload="metadata" src="{src}"></video>'
                     + _timeline(cps, float(meta["duration"] or 0))
                     + "</div>")
+    elif standalone:
+        body.append('<p class="notice">단일 파일 보기 — 영상 재생 없이 '
+                    "장면 캡처와 기록으로 봅니다</p>")
     else:
         body.append('<p class="notice">영상 파일이 없습니다(원본이 이동됐거나 정리됨) '
                     "— 장면 캡처로만 볼 수 있습니다</p>")
     body.append("</div><div>")
+    # 편집 결정을 장면 기록 위에 둔다 — 컷에서 근거 체크포인트로 내려가는
+    # 앵커가 아래를 향해야 스크롤 방향이 읽는 순서와 맞는다.
+    body.append(render_sequence_section(story))
 
     if cps:
         body += ['<h2 style="margin-top:0">장면 기록 '
@@ -720,23 +722,29 @@ def export_html(
                  '<div class="cps">']
         for c in cps:
             s, e = c["start"], c["end"]
-            card_id = html.escape(c["checkpoint_id"], quote=True)
+            card_id = checkpoint_anchor(c["id"])
             speakers = " · ".join(c["speakers"])
             who = (f'<span class="who">{html.escape(speakers)}</span>'
                    if speakers else "")
+            confidence = (
+                f'{c["confidence"]:g}' if c["confidence"] is not None else "-"
+            )
+            situation = humanize_surface(c["situation"])
             body.append(
-                f'<article class="cp" id="{card_id}"'
+                f'<article class="cp story-ground" id="{card_id}"'
+                f' data-checkpoint-id="{card_id}"'
                 f' data-span-start="{s:.2f}"'
                 f' data-span-end="{e:.2f}">'
                 '<div class="when">'
-                + _seek(s, e, f"{fmt_ts_compact(s)}–{fmt_ts_compact(e)}")
+                + _seek(s, e, f"{fmt_ts_label(s)}–{fmt_ts_label(e)}",
+                        enabled=media_available)
                 + f'<span class="badge {html.escape(c["status"])}">'
                 f'{html.escape(STATUS_KO.get(c["status"], c["status"]))}'
                 "</span></div>"
                 "<div>"
-                f'<p class="situation">{html.escape(c["situation"])}</p>'
-                f'<p class="meta">{html.escape(c["checkpoint_id"])}'
-                f' · 확신 <span class="conf">{c["confidence"]}</span>'
+                f'<p class="situation">{html.escape(situation)}</p>'
+                f'<p class="meta">{html.escape(c["id"])}'
+                f' · 확신 <span class="conf">{confidence}</span>'
                 f"{(' · ' + who) if who else ''}</p>"
                 "</div></article>")
         body.append("</div>")
@@ -748,8 +756,9 @@ def export_html(
         body += [
             f'<span class="seg-line" data-span-start="{s["start"]:.2f}"'
             f' data-span-end="{s["end"]:.2f}">'
-            f"{_seek(s['start'], None, fmt_ts_compact(s['start']))} "
-            f"{html.escape(s['text'])}</span><br>"
+            + _seek(s["start"], None, fmt_ts_label(s["start"]),
+                    enabled=media_available)
+            + f" {html.escape(s['text'])}</span><br>"
             for s in segs
         ]
         body.append("</p></details>")
@@ -766,15 +775,23 @@ def export_html(
             if not resolved.is_file():          # gc'd frame — md keeps the
                 gone += 1                       # record, the view skips it
                 continue
-            reason = reasons.get(Path(image_path).name, "")
+            if standalone:
+                img_src = _inline_image_src(resolved)
+                if img_src is None:
+                    gone += 1
+                    continue
+            else:
+                img_src = quote(image_path, safe="/-._~")
+            reason = human_reason(reasons.get(Path(image_path).name, ""))
             evidence.append(
                 f'<figure><img loading="lazy" decoding="async" '
-                f'src="{quote(image_path, safe="/-._~")}" '
-                f'alt="{html.escape(c["checkpoint_id"])}">'
+                f'src="{img_src}" '
+                f'alt="{html.escape(c["id"])}">'
                 "<figcaption>"
-                + _seek(c["start"], c["end"], fmt_ts_compact(c["start"]))
-                + f" {html.escape(c['checkpoint_id'])} — "
-                f"{html.escape(c['situation'])}"
+                + _seek(c["start"], c["end"], fmt_ts_label(c["start"]),
+                        enabled=media_available)
+                + f" {html.escape(c['id'])} — "
+                f"{html.escape(humanize_surface(c['situation']))}"
                 f"{(' · ' + html.escape(reason)) if reason else ''}"
                 "</figcaption></figure>")
     if evidence or gone:
@@ -787,7 +804,12 @@ def export_html(
         body.append("</div>")
 
     body.append("</div></div>")  # close .split
-    return _page(meta["title"], body, _SEEK_JS)
+    return _page(
+        meta["title"],
+        body,
+        _SEEK_JS + "\n" + STORY_MAP_JS,
+        extra_css=STORY_MAP_CSS,
+    )
 
 
 # 그래프 엔티티 노드 상한 — 코퍼스가 커져도 임베드 JSON과 시뮬레이션
@@ -831,8 +853,13 @@ def build_view(
     *,
     workspace_paths: Sequence[Path] | None = None,
     projection_root: Path | None = None,
+    standalone: bool = False,
 ) -> tuple[Path, int]:
-    """Regenerate every workspace's view.html + the corpus browser page."""
+    """Regenerate every workspace's view.html + the corpus browser page.
+
+    ``standalone``이면 워크스페이스마다 ``view-standalone.html``을 병행
+    생성한다(파일 1개 전달용 — 일반 뷰·캐시는 그대로).
+    """
     ws_dirs = (
         list(workspace_paths)
         if workspace_paths is not None
@@ -849,7 +876,7 @@ def build_view(
     # 포맷 솔트 — export_html/_page 렌더 포맷을 바꾸면 올려서 전량 무효화.
     # 렌더러 소스 digest에서 자동 유도 — 수동 범프를 잊으면 투영 캐시가
     # 기존 코퍼스의 플레이어 페이지를 낡은 렌더로 영구 스킵한다
-    # (2026-07-26 실측, v1→v2 수동 시절의 사고를 기계로 봉합).
+    # (v1→v2 수동 시절의 사고를 기계로 봉합).
     view_salt = renderer_salt("view")
     cache = load_projection_cache(root)
     view_cache = cache.get("view")
@@ -880,6 +907,13 @@ def build_view(
                 export_html(ws, corpus_backlink=corpus_backlink),
             )
             view_cache[rel] = fingerprint
+        if standalone:
+            # 캐시 없이 항상 재생성 — 내용이 결정적이고, 전달용 파일이
+            # 낡은 채 남는 것이 재생성 비용보다 비싸다.
+            write_text_atomic(
+                ws.root / "view-standalone.html",
+                export_html(ws, standalone=True),
+            )
         rows.append((meta, rel))
 
     sorted_rows = sorted(rows, key=lambda item: item[1])
@@ -957,7 +991,8 @@ def build_view(
             f'{READINESS_KO.get(r["readiness"], r["readiness"])}'
             "</span></td>"
             f'<td class="num">{r["cps"]}</td>'
-            f'<td><span class="clamp2">{html.escape(r["head"])}</span></td>'
+            f'<td><span class="clamp2">'
+            f'{html.escape(humanize_surface(r["head"]))}</span></td>'
             "</tr>")
     body.append('<tr id="empty-row" hidden><td colspan="6">'
                 '<div class="empty">조건에 맞는 영상이 없습니다 — '

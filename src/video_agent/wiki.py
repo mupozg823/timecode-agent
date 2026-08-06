@@ -58,8 +58,15 @@ from .projection_cache import (
     workspace_fingerprint,
 )
 from .search import corpus_root
+from .skillgen import write_skill_drafts
 from .status import _workspace_status_snapshot
 from .timestamps import fmt_ts_compact
+from .wiki_procedures import (
+    collect_procedure_steps,
+    merge_procedure_steps,
+    procedure_maturity,
+    write_procedure_pages,
+)
 from .wiki_state import (
     ENTITY_RECALL_FILENAME,
     NOTES_END,
@@ -148,6 +155,8 @@ class _Aggregate:
     # 근거 게이트에서 탈락해 이 위키에 실리지 않은 종결 체크포인트 수.
     # 빠진 것을 세지 않으면 위키는 코퍼스 전부를 담은 것처럼 읽힌다.
     omitted_unsupported: dict[str, int] = field(default_factory=dict)
+    # task-* 라벨의 절차 단계 — 근거 도달 체크포인트 한정 (P1, 큐 #52).
+    procedure_steps: dict[str, list] = field(default_factory=dict)
 
 
 def _collect(
@@ -187,6 +196,20 @@ def _collect(
         )
         if omitted > 0:
             agg.omitted_unsupported[workspace_id] = omitted
+        # 절차 단계는 include_hypotheses와 무관하게 근거 도달분만 —
+        # 추정 단계가 절차 페이지에 실리면 "원장이 보장한 절차"가 깨진다.
+        grounded_of = {
+            levels.checkpoint_id: levels.grounded
+            for levels in status_snapshot.verification.checkpoint_levels
+        }
+        merge_procedure_steps(
+            agg.procedure_steps,
+            collect_procedure_steps(
+                workspace_id,
+                status_snapshot.supported_checkpoints,
+                grounded_of,
+            ),
+        )
         checkpoints = (
             load_checkpoints(ws)
             if include_hypotheses
@@ -224,6 +247,22 @@ def _collect(
         if len(targets) == 1:
             agg.archived_target_of.setdefault(legacy, next(iter(targets)))
     return agg
+
+
+def _ws_href(
+    doc_path_of: dict[str, str],
+    workspace_id: str,
+    up: int = 2,
+    checkpoint_id: str | None = None,
+) -> str:
+    fragment = (
+        f"#{checkpoint_fragment(checkpoint_id)}"
+        if checkpoint_id is not None
+        else ""
+    )
+    target = (f"{'../' * up}"
+              f"{doc_path_of.get(workspace_id, workspace_id)}.md{fragment}")
+    return md_target(target)
 
 
 def _ws_link(
@@ -464,6 +503,7 @@ def _write_index(
     wiki: Path, page_plan, slugs, agg: _Aggregate,
     counts: dict, alias_groups: list[list[str]],
     durable: list[str], candidates: list[str], ent_link,
+    procedure_names: dict[str, str],
 ) -> Path:
     lines = _fm("index", [f"entities: {counts['entities']}"])
     lines += [
@@ -512,6 +552,17 @@ def _write_index(
         for g in alias_groups:
             lines.append("- " + " ≈ ".join(ent_link(lb) for lb in g)
                          + " — 같은 대상이면 정본 표기 하나로 라벨 통일")
+        lines.append("")
+    if agg.procedure_steps:
+        # 절차는 "어떻게"의 지식 유형 — 인물·관계와 별도 축으로 노출한다.
+        lines += ["## 절차", ""]
+        for task in sorted(agg.procedure_steps):
+            steps = agg.procedure_steps[task]
+            workspaces = {step["workspace_id"] for step in steps}
+            lines.append(
+                f"- [{escape_markdown_text(task)}]"
+                f"({md_target('procedures/' + procedure_names[task])})"
+                f" (영상 {len(workspaces)} · 단계 {len(steps)})")
         lines.append("")
     lines += ["## 엔티티", ""]
     for lb in durable:
@@ -616,14 +667,27 @@ def build_wiki(
     _write_tags_page(wiki, agg, ws_link)
     _write_relations_page(wiki, agg, ent_link, ws_link)
     _write_quotes_page(wiki, agg, ws_link)
+    procedure_names = write_procedure_pages(
+        wiki, agg.procedure_steps, ws_link,
+        partial(_ws_href, agg.doc_path_of),
+    )
+    skill_draft_names = write_skill_drafts(
+        wiki, agg.procedure_steps,
+        {row["task"]: row for row in procedure_maturity(agg.procedure_steps)},
+        procedure_names, ws_link,
+        partial(_ws_href, agg.doc_path_of),
+    )
 
     alias_groups = _alias_groups(slugs)
     counts = {"entities": len(slugs), "tags": len(agg.tag_hits),
               "relations": len(agg.relations), "quotes": len(agg.quotes),
+              "procedures": len(procedure_names),
+              "skill_drafts": len(skill_draft_names),
               "alias_groups": len(alias_groups)}
     durable, candidates = _split_durable(slugs, agg, page_plan)
     dest = _write_index(wiki, page_plan, slugs, agg, counts,
-                        alias_groups, durable, candidates, ent_link)
+                        alias_groups, durable, candidates, ent_link,
+                        procedure_names)
     reassigned = _record_entity_recall(
         wiki,
         {slug: label for label, slug in slugs.items()},

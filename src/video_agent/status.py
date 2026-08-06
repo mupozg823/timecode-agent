@@ -3,22 +3,34 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Final, Literal, cast
 
 from .checkpoint_schema import (
     CheckpointObject,
+    CheckpointValue,
     ConvergenceMetrics,
     ConvergenceResult,
     CoverageStatus,
 )
 from .checkpoint_store import _load_checkpoint_entries
 from .checkpoints import _coverage_status_from_entries, convergence_gate
+from .transcript_evidence import transcript_segment_index_from_value
+from .transcript_segments import TranscriptValue, normalize_transcript_segments
 from .verification import (
     _promotable_entries_from_entries,
     _verification_snapshot_from_entries,
 )
-from .verification_types import VerificationAudit, VerificationSnapshot
-from .workspace import Workspace
+from .verification_types import (
+    CheckpointEntries,
+    VerificationAudit,
+    VerificationSnapshot,
+)
+from .verify_priority import (
+    STATUS_QUEUE_CAP,
+    VerifyPriorityItem,
+    verify_priority_from_entries,
+)
+from .workspace import Workspace, load_json
 
 
 class ReadinessV2(ConvergenceResult):
@@ -37,6 +49,7 @@ class WorkspaceStatus(CoverageStatus):
 
     verification_audit: VerificationAudit
     readiness: ReadinessV2
+    verify_queue: list[VerifyPriorityItem]
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,9 +67,44 @@ class _WorkspaceStatusSnapshot:
 
 def _workspace_status_snapshot(ws: Workspace) -> _WorkspaceStatusSnapshot:
     """Project public status and internal modalities from one ledger read."""
-    entries = _load_checkpoint_entries(ws)
+    return _workspace_status_snapshot_from_entries(
+        ws, _load_checkpoint_entries(ws)
+    )
+
+
+class _Unread:
+    """전사 미제공 표지 — load_json의 정당한 None(부재/손상)과 구분한다."""
+
+
+_UNREAD: Final = _Unread()
+
+
+def _workspace_status_snapshot_from_entries(
+    ws: Workspace,
+    entries: CheckpointEntries,
+    *,
+    transcript_value: TranscriptValue | _Unread = _UNREAD,
+) -> _WorkspaceStatusSnapshot:
+    """호출자가 이미 읽은 원장(과 선택적 전사) 스냅샷에서 상태를 투영한다.
+
+    전사는 한 번만 읽어 두 소비자(근거 인덱스·검증 우선순위)에 나눠 준다
+    — 따로 읽으면 동시 기입 시 서로 다른 전사 위에서 판정한다.
+    """
+    raw_transcript: TranscriptValue = (
+        load_json(ws.transcript_path)
+        if isinstance(transcript_value, _Unread)
+        else transcript_value
+    )
     coverage = _coverage_status_from_entries(ws, entries)
-    verification = _verification_snapshot_from_entries(ws, entries)
+    verification = _verification_snapshot_from_entries(
+        ws,
+        entries,
+        # 두 재귀 JSON 별칭(TranscriptValue↔CheckpointValue)은 구조 동형이나
+        # list 불변성 탓에 상호 대입 불가 — 경계에서 한 번만 cast한다.
+        transcript_index=transcript_segment_index_from_value(
+            cast(CheckpointValue, raw_transcript)
+        ),
+    )
     terminal_entries = _promotable_entries_from_entries(entries)
     audit = verification.audit
     metrics: ConvergenceMetrics = {
@@ -80,6 +128,12 @@ def _workspace_status_snapshot(ws: Workspace) -> _WorkspaceStatusSnapshot:
         **coverage,
         "verification_audit": audit,
         "readiness": readiness,
+        "verify_queue": verify_priority_from_entries(
+            ws,
+            entries,
+            top=STATUS_QUEUE_CAP,
+            segments=normalize_transcript_segments(raw_transcript),
+        ),
     }
     return _WorkspaceStatusSnapshot(
         status=status,

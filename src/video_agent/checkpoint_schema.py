@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Final, TypedDict, TypeGuard
 
 from .workspace import Workspace
@@ -66,6 +67,19 @@ class ValidatedCheckpoint:
     status: str
 
 
+class PersonPresenceState(StrEnum):
+    PRESENT = "present"
+    ABSENT = "absent"
+    UNCERTAIN = "uncertain"
+
+
+@dataclass(frozen=True, slots=True)
+class PersonPresenceObservation:
+    subject: str
+    state: PersonPresenceState
+    timestamp: float
+
+
 def _is_finite_number(value: CheckpointValue) -> TypeGuard[int | float]:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
@@ -73,6 +87,50 @@ def _is_finite_number(value: CheckpointValue) -> TypeGuard[int | float]:
         return math.isfinite(value)
     except OverflowError:
         return False
+
+
+def parse_person_presence_observation(
+    value: CheckpointValue,
+    span: tuple[float, float],
+) -> PersonPresenceObservation:
+    """Parse one supplied visual observation at the checkpoint boundary."""
+    if not isinstance(value, dict):
+        raise CheckpointValidationError(
+            "'visual_observation' must be a person_presence object"
+        )
+    kind = value.get("kind")
+    if kind != "person_presence":
+        raise CheckpointValidationError(
+            "'visual_observation.kind' must be 'person_presence'"
+        )
+    subject = value.get("subject")
+    if not isinstance(subject, str) or not subject.strip():
+        raise CheckpointValidationError(
+            "'visual_observation.subject' must be non-empty"
+        )
+    raw_state = value.get("state")
+    try:
+        state = PersonPresenceState(raw_state)
+    except (TypeError, ValueError):
+        raise CheckpointValidationError(
+            "'visual_observation.state' must be 'present', 'absent', or "
+            "'uncertain'"
+        ) from None
+    timestamp = value.get("timestamp")
+    if not _is_finite_number(timestamp):
+        raise CheckpointValidationError(
+            "'visual_observation.timestamp' must be a finite number"
+        )
+    parsed_timestamp = float(timestamp)
+    if not span[0] <= parsed_timestamp < span[1]:
+        raise CheckpointValidationError(
+            "'visual_observation.timestamp' must be inside checkpoint span"
+        )
+    return PersonPresenceObservation(
+        subject=subject.strip(),
+        state=state,
+        timestamp=parsed_timestamp,
+    )
 
 
 def validate_checkpoint(
@@ -119,6 +177,16 @@ def validate_checkpoint_shape(obj: CheckpointObject) -> ValidatedCheckpoint:
             raise CheckpointValidationError(
                 "'confidence' must be a finite number between 0 and 1"
             )
+    if "exact_tokens" in obj:
+        raw_tokens = obj["exact_tokens"]
+        if not isinstance(raw_tokens, (list, tuple)) or not all(
+            isinstance(token, str) and token.strip() for token in raw_tokens
+        ):
+            raise CheckpointValidationError(
+                "'exact_tokens' must be a list of non-empty strings"
+            )
+    if "visual_observation" in obj:
+        parse_person_presence_observation(obj["visual_observation"], (start, end))
 
     return ValidatedCheckpoint(
         checkpoint_id=checkpoint_id,

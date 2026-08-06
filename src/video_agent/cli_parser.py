@@ -7,10 +7,11 @@ from importlib.metadata import PackageNotFoundError, version
 
 from . import cli_commands_global as global_commands
 from . import cli_commands_workspace as workspace_commands
+from .cli_ask_parser import add_ask_parser
 from .cli_runtime_parser import add_runtime_parser
 
 # 19개 명령이 공유하는 필수 위치 인자 — help 없이는 usage 한 줄만 보고
-# 무엇을 넣는지 알 수 없다 (도구표면 감사 2026-07-26).
+# 무엇을 넣는지 알 수 없다.
 _WS_HELP = "워크스페이스 경로 (예: va-out/<영상이름>)"
 
 
@@ -25,7 +26,12 @@ def build_parser() -> argparse.ArgumentParser:
     # 상태 값은 원장 스키마가 정본이다 — 파서가 목록을 재정의하면
     # 검증과 표면이 갈라진다. import는 여기서(모듈 상단은 workspace를
     # 조기 로드해 CLI 시작을 무겁게 한다).
-    from .checkpoint_schema import STATUSES as CHECKPOINT_STATUSES
+    from .checkpoint_schema import (
+        STATUSES as CHECKPOINT_STATUSES,
+    )
+    from .checkpoint_schema import (
+        PersonPresenceState,
+    )
 
     parser = argparse.ArgumentParser(
         prog="va",
@@ -82,6 +88,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="분석 의도/질문 — 관련 전사 구간·체크포인트를 "
                         "브리핑에 표면화")
     p.set_defaults(func=workspace_commands.cmd_brief)
+
+    add_ask_parser(sub, _WS_HELP, workspace_commands.cmd_ask)
 
     p = sub.add_parser("capture", help="capture frames at timestamps")
     p.add_argument("workspace", help=_WS_HELP)
@@ -140,6 +148,22 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", action="store_true", dest="as_json",
                    help="JSON 출력")
     p.set_defaults(func=workspace_commands.cmd_boundary_eval)
+
+    p = sub.add_parser("beat-eval",
+                       help="컷 조인 비트 정합 게이트 — 출력 타임라인 조인 "
+                            "vs 최근접 비트 오프셋. p90>gate-ms면 종료코드 1. "
+                            "--snap은 span 제안만(원장 불변)")
+    p.add_argument("workspace", help=_WS_HELP)
+    p.add_argument("--beats", required=True,
+                   help="va beats가 만든 beats.json 경로")
+    p.add_argument("--sequence", required=True, help="편집 원장 시퀀스 id")
+    p.add_argument("--gate-ms", type=float, default=40.0, dest="gate_ms",
+                   help="p90 허용 오프셋 ms (default 40 — 방법론 수락 기준)")
+    p.add_argument("--snap", action="store_true",
+                   help="조인을 비트에 앉히는 컷 span 제안 출력")
+    p.add_argument("--json", action="store_true", dest="as_json",
+                   help="JSON 출력")
+    p.set_defaults(func=workspace_commands.cmd_beat_eval)
 
     p = sub.add_parser("audioevents",
                        help="semantic audio events — laughter/applause/"
@@ -229,6 +253,26 @@ def build_parser() -> argparse.ArgumentParser:
                     help="<ws> 상대 프레임 경로 (반복 지정 가능)")
     pa.add_argument("--note", help="정정 사유·특이사항 — 사람이 읽는 문장")
     pa.set_defaults(func=workspace_commands.cmd_checkpoint_add)
+    po = cp_sub.add_parser(
+        "observe",
+        help="선택한 전체 프레임을 사람 존재 관측과 함께 기록",
+    )
+    po.add_argument("workspace", help=_WS_HELP)
+    po.add_argument("--id", dest="cp_id", required=True, help="체크포인트 id")
+    po.add_argument(
+        "--frame",
+        required=True,
+        help="<ws> 상대 경로인 provenance 추적 전체 프레임",
+    )
+    po.add_argument("--subject", required=True, help="관측 대상")
+    po.add_argument(
+        "--state",
+        required=True,
+        choices=tuple(state.value for state in PersonPresenceState),
+        help="화면 존재 상태; 판독 불가는 uncertain",
+    )
+    po.add_argument("--hypothesis", required=True, help="프레임에서 본 내용")
+    po.set_defaults(func=workspace_commands.cmd_checkpoint_observe)
     pl = cp_sub.add_parser("list", help="기록된 체크포인트 목록")
     pl.add_argument("workspace", help=_WS_HELP)
     pl.add_argument("--json", action="store_true", help="JSON 출력")
@@ -276,6 +320,17 @@ def build_parser() -> argparse.ArgumentParser:
                    help="va-out roots or workspace dirs (default ./va-out)")
     p.add_argument("--json", action="store_true", help="JSON 출력")
     p.set_defaults(func=global_commands.cmd_audit)
+
+    p = sub.add_parser(
+        "rebind",
+        help="legacy 워크스페이스를 리비전 결박으로 백필 — 기본 dry-run, "
+             "--apply로만 기록. 사후 검증 실패 시 전량 복원")
+    p.add_argument("targets", nargs="*",
+                   help="va-out roots or workspace dirs (default ./va-out)")
+    p.add_argument("--apply", action="store_true",
+                   help="실제로 쓴다 (없으면 무엇이 바뀔지만 보고)")
+    p.add_argument("--json", action="store_true", help="JSON 출력")
+    p.set_defaults(func=global_commands.cmd_rebind)
 
     p = sub.add_parser("highlights",
                        help="audio-energy highlight candidates (placement)")
@@ -374,6 +429,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("roots", nargs="*",
                    help="one corpus root or workspaces under one common root "
                         "(default ./va-out)")
+    p.add_argument("--standalone", action="store_true",
+                   help="also write view-standalone.html per workspace — "
+                        "captures inlined as data URIs, no video/relative "
+                        "refs, for single-file handoff")
     p.set_defaults(func=global_commands.cmd_view)
 
     p = sub.add_parser("wiki",
@@ -391,6 +450,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="compatibility projection including hypothesized labels",
     )
     p.set_defaults(func=global_commands.cmd_wiki)
+
+    p = sub.add_parser("skillgen",
+                       help="compile promoted procedures (3+ recurring "
+                            "videos) into human-approval-pending SKILL "
+                            "drafts under wiki/skills — execution steps "
+                            "from visually grounded checkpoints only, "
+                            "known-weaknesses section mandatory")
+    p.add_argument("roots", nargs="*",
+                   help="one corpus root or workspaces under one common root "
+                        "(default ./va-out)")
+    p.add_argument("--route", action="store_true",
+                   help="컴파일 없이 라우팅 표만 — 태스크별 게이트 상태"
+                        "(draft/blocked-intent/needs-workspaces)와 사유")
+    p.set_defaults(func=global_commands.cmd_skillgen)
+
+    p = sub.add_parser("beats",
+                       help="BGM 비트 그리드 추출(고정 템포 모델) — 편집 "
+                            "레인 배치 제약 beats.json 생성. 컷 양자화 "
+                            "게이트는 beat-eval")
+    p.add_argument("media", help="오디오 또는 영상 파일(오디오 트랙 사용)")
+    p.add_argument("--seconds", type=float, default=None,
+                   help="앞에서부터 분석할 길이 초 (default 전체)")
+    p.add_argument("--out", default=None,
+                   help="beats.json 경로 (default <media옆>.beats.json)")
+    p.add_argument("--json", action="store_true", dest="as_json",
+                   help="요약 JSON 출력")
+    p.set_defaults(func=global_commands.cmd_beats)
 
     p = sub.add_parser("gc",
                        help="storage hygiene: per-workspace size report + "

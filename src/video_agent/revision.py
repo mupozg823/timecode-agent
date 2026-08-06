@@ -37,7 +37,11 @@ from .workspace_lock import stable_workspace_lock
 if TYPE_CHECKING:
     from .workspace import Workspace
 
-type _FileSignature = tuple[int, int, int, int, int] | None
+type _FileSignature = tuple[int, int, int, int, int] | tuple[str] | None
+
+# 판독 불가(stat 실패가 부재가 아닌 경우)의 서명 — 부재(None)와 구분해야
+# 부재 수용이 남긴 receipt가 판독 불가 소스까지 무검증 통과시키지 않는다.
+_UNREADABLE_SIGNATURE: Final[tuple[str]] = ("unreadable",)
 type RevisionInputSignature = tuple[
     _FileSignature,
     _FileSignature,
@@ -143,11 +147,71 @@ def _source_revision(
     )
 
 
+_BINDING_RECEIPT_FILENAME: Final = ".tca-revision-receipt.json"
+
+
+def _normalized_signature(value: object) -> object:
+    """JSON은 튜플을 배열로 만든다 — 비교 전에 같은 모양으로 되돌린다."""
+    if isinstance(value, list):
+        return tuple(_normalized_signature(item) for item in value)
+    return value
+
+
+def _read_binding_receipt(
+    ws: Workspace, signature: RevisionInputSignature
+) -> RevisionBindings | None:
+    """직전에 증명된 결박을 되읽는다 — 입력 서명이 그대로일 때만.
+
+    결박 확인은 원본 전체를 해시한다. 프로세스 안에서는 메모리 캐시가
+    한 번으로 줄이지만, CLI는 명령마다 새 프로세스다. 실측(2026-07-28):
+    결박된 워크스페이스 27개 코퍼스에서 `va audit` 4.47초 중 4.14초가
+    이 해시였다 — 코퍼스가 전부 legacy일 때는 조기 반환돼 보이지 않던
+    비용이다. `.tca-decoded-cfr.json`과 같은 방식으로 증명을 남긴다.
+    """
+    try:
+        raw = json.loads(
+            (ws.root / _BINDING_RECEIPT_FILENAME).read_text("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    if _normalized_signature(raw.get("signature")) != signature:
+        return None
+    bindings = raw.get("bindings")
+    if not isinstance(bindings, dict):
+        return None
+    if not all(isinstance(bindings.get(field), str) for field in REVISION_FIELDS):
+        return None
+    return {
+        "source_revision_id": bindings["source_revision_id"],
+        "transcript_revision_id": bindings["transcript_revision_id"],
+        "timing_revision_id": bindings["timing_revision_id"],
+    }
+
+
+def _store_binding_receipt(
+    ws: Workspace, signature: RevisionInputSignature, bindings: RevisionBindings
+) -> None:
+    """증명을 남긴다 — 실패해도 조용히 넘어간다. 계산은 캐시가 아니라 원장이다."""
+    try:
+        write_text_atomic(
+            ws.root / _BINDING_RECEIPT_FILENAME,
+            json.dumps(
+                {"signature": signature, "bindings": bindings},
+                ensure_ascii=False,
+            ),
+        )
+    except OSError:
+        pass
+
+
 def _file_signature(path: Path) -> _FileSignature:
     try:
         stat = path.stat()
-    except OSError:
+    except FileNotFoundError:
         return None
+    except OSError:
+        return _UNREADABLE_SIGNATURE
     return (
         stat.st_dev,
         stat.st_ino,
@@ -206,8 +270,16 @@ def publish_workspace_revisions(
     *,
     manifest_updates: Mapping[str, RevisionValue] | None = None,
     expected_source_stat: Mapping[str, int] | None = None,
+    allow_legacy_backfill: bool = False,
 ) -> RevisionBindings:
-    """Publish one revision while excluding other workspace-wide transitions."""
+    """Publish one revision while excluding other workspace-wide transitions.
+
+    `allow_legacy_backfill` is the single door through which a markerless
+    legacy workspace may be bound after the fact. It stays closed by default:
+    binding without an ingest-time seal is an assertion, not a proof, and only
+    `revision_backfill` — which re-measures the source and rolls back on any
+    record loss — is entitled to make it.
+    """
     with stable_workspace_lock(
         ws.root,
         ws.workspace_lock_path,
@@ -224,6 +296,7 @@ def publish_workspace_revisions(
                 ws,
                 manifest_updates=manifest_updates,
                 expected_source_stat=expected_source_stat,
+                allow_legacy_backfill=allow_legacy_backfill,
             )
 
 
@@ -232,6 +305,7 @@ def _publish_workspace_revisions_locked(
     *,
     manifest_updates: Mapping[str, RevisionValue] | None = None,
     expected_source_stat: Mapping[str, int] | None = None,
+    allow_legacy_backfill: bool = False,
 ) -> RevisionBindings:
     """Hash and publish while the operation and manifest locks are held."""
     manifest: RevisionRecord = ws.manifest
@@ -250,6 +324,7 @@ def _publish_workspace_revisions_locked(
         manifest.get("ingest_state") == "building"
         or manifest.get("revision_draft") is True
         or fully_bound
+        or allow_legacy_backfill
     ):
         raise RevisionBindingError(
             "legacy workspace is read-only for revision publication; ingest "
@@ -278,6 +353,10 @@ def _publish_workspace_revisions_locked(
             raise RevisionBindingError(
                 "workspace source content revision mismatch"
             )
+    elif allow_legacy_backfill:
+        # 백필은 봉인된 stat이 없다 — 그래서 호출자가 직접 재측정하고,
+        # 재측정이 기록된 관측과 어긋나면 여기 오기 전에 멈춘다.
+        pass
     elif manifest.get("source_stat") != source_stat:
         raise RevisionBindingError(
             "workspace source changed after probe"
@@ -323,14 +402,35 @@ def current_revision_bindings(ws: Workspace) -> RevisionBindings | None:
     if cached is not None and cached[0] == signature:
         return _copy_bindings(cached[1])
 
+    receipt = _read_binding_receipt(ws, signature)
+    if receipt is not None and all(
+        manifest.get(field) == value for field, value in receipt.items()
+    ):
+        _REVISION_CACHE[ws] = (signature, receipt)
+        return _copy_bindings(receipt)
+
     source_content_hash = manifest.get("source_content_hash")
     if not (
         isinstance(source_content_hash, str)
         and source_content_hash.startswith("sha256:")
     ):
         raise RevisionBindingError("workspace source content hash is missing")
-    actual_source_hash, _source_stat = _stable_file_hash(ws.video)
-    if actual_source_hash != source_content_hash:
+    try:
+        actual_source_hash, _source_stat = _stable_file_hash(ws.video)
+    except RevisionBindingError as error:
+        # 소스 부재는 드리프트가 아니다 — ingest가 남긴 seal이 권위다.
+        # gc 미디어 퍼지나 외부 이동 뒤에도 원장은 읽히고 텍스트 분석은
+        # 이어져야 한다(legacy의 "재측정 불가 시 거부"는 seal이 없어서다,
+        # ADR-0006). 파일이 다시 나타나면 재해싱 검증이 그대로 재개된다.
+        # 부재 판별은 예외 원인으로만 한다 — Path.exists()는 EACCES를
+        # 삼켜 판독 불가를 부재로 오인한다.
+        if not isinstance(error.__cause__, FileNotFoundError):
+            raise
+        actual_source_hash = None
+    if (
+        actual_source_hash is not None
+        and actual_source_hash != source_content_hash
+    ):
         raise RevisionBindingError("workspace source content revision mismatch")
 
     transcript_revision_id = _json_file_hash(ws.transcript_path)
@@ -349,6 +449,7 @@ def current_revision_bindings(ws: Workspace) -> RevisionBindings | None:
         if manifest.get(field) != value:
             raise RevisionBindingError(f"workspace {field} mismatch")
     _REVISION_CACHE[ws] = (signature, expected)
+    _store_binding_receipt(ws, signature, expected)
     return _copy_bindings(expected)
 
 

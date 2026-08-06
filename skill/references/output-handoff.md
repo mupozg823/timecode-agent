@@ -2,26 +2,27 @@
 
 Deep reference for loop §5. `SKILL.md` owns mandatory boundary self-review,
 delivery encoding, and unsupported editor-path bans. This file owns scoring,
-examples, and format details.
+rhythm, direction grammar, and format details.
 
 ## Edit-scope convergence (R_edit)
 
-Use R_edit only when the brief names a source interval or event, such as a scene
-at 3:16. Open-ended discovery must compare candidates across the full selection
-scope; converge globally before choosing a highlight.
+Use R_edit only when the brief names a source interval or event (a scene at
+3:16); open-ended discovery converges globally across the full selection
+scope first.
 
 **Overlap is not coverage.** `validate_terminal_grounding` requires the entire
 cut span to be covered by the union of supported terminal
-(`verified`/`corrected`) checkpoints. Verify uncovered regions or narrow the cut.
+(`verified`/`corrected`) checkpoints. Verify uncovered regions or narrow the
+cut.
 
-Only boundary slack is allowed: up to `min(2.0s, cut duration × 10%)` at each
-head and tail because word-snapped cuts and human checkpoint spans differ.
-Slack never absorbs a hole in the cut body.
+Boundary slack only: up to `min(2.0s, cut duration × 10%)` per head/tail
+(word-snapped cuts and human spans differ). Slack never absorbs a hole in
+the cut body.
 
-When these conditions hold, edit work may begin before global `covered_ratio`
-converges. A globally `converged` workspace still requires local verification
-when the target interval is `hypothesized`. Summaries and whole-video analysis
-still require global convergence.
+Edit work may then begin before global `covered_ratio` converges. A
+`converged` workspace still needs local verification when the target interval
+is `hypothesized`; summaries and whole-video analysis still need global
+convergence.
 
 ## Five-axis clip score
 
@@ -50,8 +51,8 @@ instead of one nominal winner.
 
 - Every option must pass word snap → `boundary_eval` → visual self-review.
   Options differ in cut selection and order, never boundary quality.
-- Promote only the chosen option in the sequence ledger. Record rejection
-  reasons for others in `alternatives_rejected`.
+- Promote only the chosen option in the sequence ledger; record rejection
+  reasons in `alternatives_rejected`.
 
 ## Deterministic boundary metrics
 
@@ -59,38 +60,69 @@ instead of one nominal winner.
 checks every sequence boundary and rendered join. Treat thresholds as advisory:
 
 - `word_interior`: cuts inside a word; re-snap immediately.
-- `tight_tail`: less than 0.12s after a word despite available silence; preserve
-  meaningful post-line silence.
+- `tight_tail`: less than 0.12s after a word despite available silence;
+  preserve meaningful post-line silence.
 - `loud_step`: RMS changes by at least 12dB; inspect room tone or music.
 - `loud_join`: assembled audio jumps even when source edges look clean.
 - `jump_cut_risk`: SSIM > 0.75 suggests a time jump in similar framing.
 
-Join frames remain in the capture cache for visual self-review. For individual
-points use `-t <boundary> [-t ...]`; `-t` and `--sequence` are exclusive.
+Join frames stay in the capture cache for visual self-review. Individual
+points: `-t <boundary>` (repeatable); `-t` and `--sequence` are exclusive.
 
 The edit loop is: Pareto options → word snap → metrics → visual self-review →
 re-snap → terminal promotion. Audio detects word/level discontinuity; vision
 detects shot intrusion and composition jumps.
 
+## Beat-quantized rhythm lane
+
+Rhythm = quantizing every output-timeline join to the beat grid.
+
+1. `va beats <bgm> [--seconds N]` → beats.json (fixed-tempo model; variable
+   tempo is out of scope and `tempo_model` records that limit).
+2. Author cuts so joins land on `beat_times`: one cut per beat for montage,
+   half-beat motion variation, stronger pulse on downbeats (every 4th). Map
+   structure to the `energy_1s` arc — climax on the energy jump, fade on
+   decay.
+3. `va beat-eval <ws> --beats <json> --sequence <id>` gates
+   p90 |join − nearest beat| <= 40ms (exit 0 = pass). `--snap` prints a span
+   proposal; applying it is a new sequence revision — re-run `boundary-eval`
+   (source tails changed).
+
+Fix rhythm defects by re-placing cuts on beat indexes; second-based nudging
+is a regression. Frame-verify at `B(i) = round(beat_time × fps)` — measured
+grids carry a phase offset; nominal bpm division misplaces checks.
+
+## Montage grammar
+
+| Technique | Form |
+|---|---|
+| Kuleshov re-contextualizing | repeat one shot after different predecessors at short equal beat intervals; converge on a split-screen compare |
+| One-point push-in | symmetric composition, slow scale-in across beats — tension before a reveal |
+| Chapter letterbox | constant bars with chapter cards; cut-to-black between sections |
+| Grade washes | per-section soft-light wash + vignette in one top overlay — never touches scene code |
+
+Remotion is the verified beat-native backend (place scenes and cuts by beat
+index). HyperFrames (HTML → deterministic MP4) is an unmeasured candidate —
+compare before adopting and record the result.
+
 ## Clip encoding
 
 `va clip <ws> --start 1:23 --end 2:05 --accurate`
 
-- For live work or 4K previews, `--hw hevc` (or h264) uses VideoToolbox on
-  supported macOS hardware and lowers CPU load.
-- Hardware encoding is slightly less efficient than libx264/265 at equal size.
-  Use `--hw` for preview/review; omit it for final delivery and archives.
+- `--hw hevc` (or h264) uses VideoToolbox on supported macOS hardware — lower
+  CPU load, slightly less efficient than libx264/265 at equal size. Use for
+  preview/review; omit for final delivery and archives.
 
 ## 9:16 reframing
 
 `va reframe <ws> <clip> --roi x,y,w,h [--roi ...] --mode pan|split`
 
-- Open one full-resolution frame and estimate each face ROI in pixels, including
-  mouth and chin. With a fixed camera, one frame is sufficient.
-- One subject: one centered ROI. Two speakers: ask the user to choose motion-led
-  `pan` or fixed stacked `split`.
-- `pan` prints a speaker timeline to stderr. Compare it with diarization labels
-  to support mappings such as S0 = left subject.
+- Estimate each face ROI in pixels from one full-resolution frame, including
+  mouth and chin; a fixed camera needs only one frame.
+- One subject: one centered ROI. Two speakers: ask the user to choose
+  motion-led `pan` or fixed stacked `split`.
+- `pan` prints a speaker timeline to stderr; compare it with diarization
+  labels (S0 = left subject and the like).
 
 ## NLE formats
 

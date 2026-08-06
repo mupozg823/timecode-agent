@@ -25,7 +25,7 @@ def _freeze_command_paths(args) -> None:
     """Resolve user aliases once before deriving leases and handler inputs."""
     if workspace := getattr(args, "workspace", None):
         args.workspace = str(Path(workspace).resolve())
-    if args.command in {"audit", "index", "search", "view", "wiki"}:
+    if args.command in {"audit", "index", "search", "view", "wiki", "skillgen"}:
         if args.roots:
             args.roots = [str(Path(root).resolve()) for root in args.roots]
     elif args.command == "bridge":
@@ -43,7 +43,7 @@ def _command_workspace_paths(args) -> list[Path]:
         return [Path(workspace).resolve()]
 
     roots: list[str] | None = None
-    if args.command in {"audit", "index", "search", "view", "wiki"}:
+    if args.command in {"audit", "index", "search", "view", "wiki", "skillgen"}:
         roots = args.roots
     elif args.command == "bridge":
         roots = [args.corpus]
@@ -83,11 +83,12 @@ def _dedupe_workspace_paths(paths: list[Path]) -> list[Path]:
 def _projection_root(args) -> Path | None:
     """Freeze the projection owner before mutable aliases can be retargeted.
 
-    search가 포함되는 이유: 문서 캐시 DB(.tca-search-cache.db)의 소유
-    루트를 리스 스냅샷과 같은 시점에 확정해야 핸들러가 캐시를 쓸 수 있다
-    — 루트 없이 경로 튜플만 받으면 부분집합과 구분이 안 돼 캐시를 우회한다.
+    search가 포함되는 이유: 검색 인덱스 DB(.tca-search-cache.db)의 소유
+    루트를 리스 스냅샷과 같은 시점에 확정해야 핸들러가 인덱스를 쓸 수 있다
+    — 루트 없이 경로 튜플만 받으면 부분집합과 구분이 안 돼 인덱스를
+    우회한다.
     """
-    if args.command in {"audit", "index", "view", "wiki", "search"}:
+    if args.command in {"audit", "index", "view", "wiki", "search", "skillgen"}:
         return corpus_root(args.roots or None).resolve()
     if args.command == "bridge":
         return Path(args.corpus).resolve()
@@ -179,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     except KeyError as e:
         # 워크스페이스 산출물의 필드 결손 — JSONDecodeError는 잡히는데
         # KeyError만 traceback으로 새고 있었다. 결손원은 manifest만이
-        # 아니라 words.json 등일 수도 있어(PR #41 리뷰) 단정하지 않는다.
+        # 아니라 words.json 등일 수도 있어 단정하지 않는다.
         print(f"error: missing field {e} — 워크스페이스 산출물(JSON)이 "
               "잘렸거나 구버전일 수 있습니다. manifest.json이 원인이면 "
               "va ingest로 재생성하십시오", file=sys.stderr)

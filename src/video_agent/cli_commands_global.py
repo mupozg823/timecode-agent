@@ -103,12 +103,73 @@ def cmd_audit(args) -> int:
         f"readiness={report['readiness_counts']} "
         f"legacy={report['readiness_legacy_counts']}"
     )
+    alignment = report["trigger_alignment"]
+    if alignment["verify_transitions"]:
+        print(f"검증 트리거 정렬: {alignment['aligned_top3']}/"
+              f"{alignment['verify_transitions']} top3")
+    maturity = report["procedure_maturity"]
+    if maturity:
+        head = " · ".join(
+            f"{row['task']} {row['workspace_count']}영상/"
+            f"{row['step_count']}단계(시각 "
+            f"{row['visually_grounded_ratio']:.0%})"
+            + (" ⚠정밀도 미보장" if row["precision_warning"] else "")
+            + (" ⚠취지 이탈" if not row["intent_coherent"] else "")
+            + (" ★스킬 후보" if row["skill_candidate"] else "")
+            for row in maturity[:5])
+        print(f"절차 성숙도: {head}"
+              + (f" 외 {len(maturity) - 5}" if len(maturity) > 5 else ""))
+    evidence = report.get("procedure_evidence")
+    if evidence and evidence["step_count"]:
+        from .wiki_procedures import EVIDENCE_CODES, EVIDENCE_KO
+
+        # 분포는 게이트가 아니라 보고다 — 추정 단계가 있다는 사실이 아니라
+        # 그것이 어느 표면에도 보이지 않는 것이 실패다.
+        dist = " · ".join(
+            f"{EVIDENCE_KO[code]} {evidence['counts'].get(code, 0)}"
+            f"({evidence['ratios'].get(code, 0.0):.0%})"
+            for code in EVIDENCE_CODES)
+        print(f"절차 근거 분포: {dist} — 총 {evidence['step_count']}단계")
+        estimated = [
+            row for row in evidence["by_task"]
+            if row["counts"].get("agent_estimated")
+        ]
+        for row in estimated[:5]:
+            print(f"  ? {row['task']}: 추정 "
+                  f"{row['counts']['agent_estimated']}/{row['step_count']}단계")
+    unverified = report.get("procedure_unverified_tokens")
+    if unverified and unverified["token_count"]:
+        # exact_tokens는 "화면에서 확정한 문자열"로 읽힌다 — 발화 단독 근거인
+        # 토큰이 그 이름 아래 섞여 있으면 사람도 다음 파이프라인도 확정으로
+        # 읽는다. 임계도 종료코드도 걸지 않고 구분만 세운다.
+        print(f"시각 미확정 토큰: {unverified['token_count']}개 "
+              f"({unverified['step_count']}단계) — evidence=speech_only 단계의 "
+              "exact_tokens는 발화 근거일 뿐 화면 확정이 아니다")
+        for row in unverified["rows"][:5]:
+            print(f"  ~ {row['task']}/{row['workspace_id']} "
+                  f"{row['checkpoint_id']}: {' '.join(row['tokens'])}")
+    images = report.get("image_consistency")
+    if images and images["mismatched_count"]:
+        # 촬영은 원장에만 append되고 사람이 읽는 인덱스는 따로 렌더된다 —
+        # 그 사이 스틸은 정상 기록된 채로 발행에서만 빠진다.
+        print(f"이미지 정합: {images['mismatched_count']}"
+              f"/{images['workspace_count']}개 워크스페이스 불일치 "
+              f"(원장 {images['catalog_total']} vs 인덱스 "
+              f"{images['indexed_total']}) — `va index <코퍼스>`로 재발행")
+        for row in images["rows"][:8]:
+            declared = "없음" if row["declared"] is None else row["declared"]
+            print(f"  ≠ {row['workspace']}: 원장 {row['catalog']} · 인덱스 "
+                  f"{row['indexed']} · 선언 {declared}")
+            for item in row["missing"][:4]:
+                print(f"      미발행 {item}")
+            for item in row["orphaned"][:4]:
+                print(f"      원장에 없음 {item}")
     declared = report.get("verification_levels_declared") or {}
     grounded = report.get("verification_levels_grounded") or {}
     if declared or grounded:
         # 두 축을 함께 인쇄한다. 선언 축만 보이던 동안 실측 코퍼스의 무근거
         # 46/165가 요약에서 사라졌다 — 계산해 두고 말하지 않으면 사람은
-        # "전부 근거 있음"으로 읽는다(2026-07-27).
+        # "전부 근거 있음"으로 읽는다.
         ko = {"cross_modal": "교차모달", "visual_only": "시각단독",
               "transcript_only": "전사단독", "unsupported": "무근거"}
 
@@ -144,6 +205,22 @@ def cmd_audit(args) -> int:
             "(엔티티 2+ 인데 relations 미기재 — --json의 "
             "relation_candidates에서 대상 확인)"
         )
+    binding = report.get("binding_counts") or {}
+    if binding:
+        # 결박 상태는 "새 증거를 쓸 수 있는가"의 다른 이름이다. 이것이 보이지
+        # 않으면 코퍼스가 통째로 동결돼도 어느 표면도 말하지 않는다
+        # (2026-07-28 실측: 40/40 미결박 — 이해 루프 정지가 무표시였다).
+        # draft는 결박이 없지만 첫 기입 때 스스로 발행한다 — 동결이 아니다.
+        ko = {"bound": "결박됨", "draft": "초안(쓰기 가능)", "legacy": "미결박",
+              "incomplete": "결박 불완전", "unreadable": "판독 불가"}
+        line = " · ".join(
+            f"{ko.get(state, state)} {count}"
+            for state, count in binding.items())
+        frozen = binding.get("legacy", 0) + binding.get("incomplete", 0)
+        tail = (f" — {frozen}개는 새 증거를 쓸 수 없다(읽기 전용). 이해를 "
+                "이어가려면 `va ingest`로 새 워크스페이스를 만든다"
+                if frozen else "")
+        print(f"결박: {line}{tail}")
     access = report.get("access") or {}
     if access.get("total"):
         by_command = " · ".join(
@@ -344,6 +421,7 @@ def cmd_view(args) -> int:
         args.roots or None,
         workspace_paths=getattr(args, "_workspace_paths", None),
         projection_root=getattr(args, "_projection_root", None),
+        standalone=getattr(args, "standalone", False),
     )
     _record_corpus_read(args, "view", hits=n)
     print(f"{dest} — {n}개 워크스페이스")
@@ -361,7 +439,108 @@ def cmd_wiki(args) -> int:
     )
     _record_corpus_read(args, "wiki", hits=c["entities"])
     print(f"{dest} — 엔티티 {c['entities']} · 태그 {c['tags']} · "
-          f"관계 {c['relations']} · 대사 {c['quotes']}")
+          f"관계 {c['relations']} · 대사 {c['quotes']}"
+          + (f" · 절차 {c['procedures']}" if c.get("procedures") else "")
+          + (f" · 스킬 초안 {c['skill_drafts']}"
+             if c.get("skill_drafts") else ""))
+    return 0
+
+
+def cmd_beats(args) -> int:
+    """BGM 비트 그리드를 추출해 beats.json 아티팩트로 남긴다."""
+    from .beats import extract_beats, write_beats_json
+
+    media = Path(args.media)
+    if not media.is_file():
+        print(f"미디어 파일이 없다: {media}", file=sys.stderr)
+        return 2
+    grid = extract_beats(media, seconds=args.seconds)
+    out = (
+        Path(args.out) if args.out
+        else media.with_name(media.stem + ".beats.json")
+    )
+    write_beats_json(out, grid)
+    summary = {
+        "bpm": grid["bpm"],
+        "beats": len(grid["beat_times"]),
+        "analyzed_s": grid["analyzed_s"],
+        "tempo_model": grid["tempo_model"],
+        "out": str(out),
+    }
+    if args.as_json:
+        print(json.dumps(summary, ensure_ascii=False))
+    else:
+        first = [round(b, 2) for b in grid["beat_times"][:8]]
+        print(
+            f"BPM {grid['bpm']}  beats {len(grid['beat_times'])}  "
+            f"analyzed {grid['analyzed_s']}s  first8 {first}"
+        )
+        print(f"{out} — 컷 양자화 게이트는 va beat-eval")
+    return 0
+
+
+def _skillgen_route(args) -> int:
+    """컴파일 없이 태스크별 스킬 라우팅 표만 — 게이트 미달 사유 포함."""
+    from .corpus_audit import audit_corpus
+    from .wiki_procedures import route_verdict
+
+    report = audit_corpus(
+        args.roots or None,
+        workspace_paths=getattr(args, "_workspace_paths", None),
+        projection_root=getattr(args, "_projection_root", None),
+    )
+    rows = report["procedure_maturity"]
+    _record_corpus_read(args, "skillgen-route", hits=len(rows))
+    if not rows:
+        print("절차가 아직 없다 — task-* 태그 체크포인트가 라우팅의 "
+              "입력이다(절차 규약은 wiki-schema 참조)")
+        return 0
+    for row in rows:
+        line = (
+            f"{row['task']}  {row['workspace_count']}영상/"
+            f"{row['step_count']}단계 시각 "
+            f"{row['visually_grounded_ratio']:.0%}  "
+            f"[{route_verdict(row)}]"
+        )
+        if row["tool_consensus"]:
+            line += "  도구 " + ",".join(row["tool_consensus"])
+        if row["offdomain_workspaces"]:
+            line += "  이탈 " + ",".join(row["offdomain_workspaces"])
+        if row["precision_warning"]:
+            line += "  ⚠정밀도"
+        print(line)
+    print("draft=컴파일 대상 · blocked-intent=취지 이탈 소스 정정 전 "
+          "승격 금지 · needs-workspaces=재등장 부족")
+    return 0
+
+
+def cmd_skillgen(args) -> int:
+    """승격된 절차의 SKILL 초안을 컴파일하고 승인 절차를 안내한다."""
+    from .skillgen import is_skill_draft
+    from .wiki import build_wiki
+
+    if getattr(args, "route", False):
+        return _skillgen_route(args)
+    dest, c = build_wiki(
+        args.roots or None,
+        workspace_paths=getattr(args, "_workspace_paths", None),
+        projection_root=getattr(args, "_projection_root", None),
+    )
+    _record_corpus_read(args, "skillgen", hits=c.get("skill_drafts", 0))
+    skills = dest.parent / "skills"
+    # 수기·승인 사본(비소유)은 초안이 아니다 — 생성분만 나열한다.
+    drafts = sorted(
+        page.name for page in skills.glob("*.md") if is_skill_draft(page)
+    ) if skills.is_dir() else []
+    if not c.get("skill_drafts"):
+        print("스킬 후보 절차가 아직 없다 — 재등장 3영상 이상이 승격 기준"
+              "(va audit의 절차 성숙도 축 참고)")
+        return 0
+    print(f"스킬 초안 {c['skill_drafts']}건 — {skills}")
+    for name in drafts:
+        print(f"  {name}")
+    print("초안은 사람 승인 전 활성 금지 — 검토 후 승격 사본을 만들어 "
+          "쓰고, 원본 초안은 위키 재생성이 관리한다")
     return 0
 
 
@@ -376,3 +555,56 @@ def cmd_gc(args) -> int:
     )
     print(text)
     return code
+
+
+def cmd_rebind(args) -> int:
+    """Bind legacy workspaces after the fact — dry run unless `--apply`.
+
+    되돌릴 수 없는 데이터 변경이라 기본값이 실행이 아니다. 무엇이 바뀌는지
+    먼저 보여주고, 사용자가 `--apply`를 적을 때만 쓴다.
+    """
+    from .revision_backfill import BackfillRefused, backfill_workspace
+    from .workspace import Workspace
+    from .workspace_discovery import find_workspaces
+
+    paths = find_workspaces(args.targets or None)
+    if not paths:
+        print("워크스페이스를 찾지 못했다", file=sys.stderr)
+        return 1
+
+    done: list[dict] = []
+    refused: list[tuple[str, str]] = []
+    for path in paths:
+        try:
+            done.append(backfill_workspace(Workspace(path), apply=args.apply))
+        except BackfillRefused as error:
+            refused.append((path.name, str(error)))
+        except (OSError, ValueError) as error:
+            refused.append((path.name, f"{type(error).__name__}: {error}"))
+
+    if args.json:
+        print(json.dumps({
+            "applied": args.apply,
+            "workspaces": done,
+            "refused": [{"workspace": name, "reason": why}
+                        for name, why in refused],
+        }, ensure_ascii=False, indent=1))
+        return 0
+
+    clamped = sum(item["clamped_spans"] for item in done)
+    records = sum(sum(item["records"].values()) for item in done)
+    verb = "결박함" if args.apply else "결박 가능"
+    print(f"{verb}: {len(done)}개 · 기록 {records}줄" + (
+        f" · span 클램프 {clamped}건" if clamped else ""))
+    for item in done:
+        note = (f"  (span {item['clamped_spans']}건을 미디어 끝에 맞춤)"
+                if item["clamped_spans"] else "")
+        print(f"  · {item['workspace']} — 기록 "
+              f"{sum(item['records'].values())}줄{note}")
+    if refused:
+        print(f"\n거부: {len(refused)}개")
+        for name, why in refused:
+            print(f"  ✗ {name}: {why}")
+    if not args.apply and done:
+        print("\n실제로 쓰려면 --apply. 원장은 사후 검증에 실패하면 전량 복원된다.")
+    return 0

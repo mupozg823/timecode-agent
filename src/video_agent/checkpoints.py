@@ -20,7 +20,11 @@ from .checkpoint_store import (
     load_checkpoint_history,
     load_checkpoints,
 )
-from .verification import promotable_checkpoints, verification_audit
+from .verification import (
+    promotable_checkpoints,
+    promotable_checkpoints_from_entries,
+    verification_audit,
+)
 from .workspace import Workspace
 
 __all__ = [
@@ -31,6 +35,7 @@ __all__ = [
     "load_checkpoint_history",
     "load_checkpoints",
     "promotable_checkpoints",
+    "promotable_checkpoints_from_entries",
     "verification_audit",
 ]
 

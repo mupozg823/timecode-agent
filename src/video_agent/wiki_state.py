@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import stat
@@ -26,6 +27,10 @@ _NOTES_RE = re.compile(
 _ENTITY_RE = re.compile(r"^entity:\s*(.+)$", re.MULTILINE)
 _GENERATED_ENTITY_TYPE = "type: tca-wiki-entity"
 _QUARANTINED_ENTITY_TYPE = "type: tca-wiki-hypothesis"
+# `%`까지 escape해야 되돌릴 수 있다 — 그러지 않으면 `A%5BB`라는 라벨이
+# `A[B`의 슬러그를 그대로 차지한다.
+_RESERVED_RE = re.compile(r'[\\/:*?"<>|#\[\]^\n%]')
+_SLUG_MAX: Final = 80
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,9 +94,24 @@ def existing_notes(path: Path | None) -> str:
     return _notes_from_text(path.read_text(encoding="utf-8"))
 
 
+def _label_digest(label: str) -> str:
+    return hashlib.sha256(label.encode("utf-8")).hexdigest()[:8]
+
+
 def _slug(label: str) -> str:
-    slug = re.sub(r'[\\/:*?"<>|#\[\]^\n]', "_", label).strip()
-    return slug[:80] or "_"
+    """서로 다른 라벨에 서로 다른 슬러그를 준다 — 라벨만 보고.
+
+    예약 문자를 하나의 `_`로 뭉개면 `A[B`와 `A#B`가 같은 슬러그를 두고
+    다투게 되고, 승자는 디스크에 무엇이 먼저 있었는지로 갈렸다. 그래서 같은
+    원장을 순차로 쌓느냐 한 번에 재생성하느냐에 따라 골격이 뒤바뀌었다.
+    문자마다 다른 escape를 쓰면 그 다툼 자체가 생기지 않는다.
+
+    길이 상한은 정보를 잃으므로 잘린 자리에 라벨 지문을 남긴다.
+    """
+    slug = _RESERVED_RE.sub(lambda m: f"%{ord(m.group()):02X}", label).strip()
+    if len(slug) > _SLUG_MAX:
+        slug = f"{slug[:_SLUG_MAX - 9]}-{_label_digest(label)}"
+    return slug or "_"
 
 
 def _generated_entity(path: Path, page_type: str) -> str | None:
@@ -153,10 +173,12 @@ def plan_entity_pages(ent_dir: Path, labels: set[str]) -> EntityPagePlan:
             source = sources[0] if sources else None
             base = source.stem if source is not None else _slug(label)
             slug = base
-            suffix = 2
             while slug.casefold() in used:
-                slug = f"{base}-{suffix}"
-                suffix += 1
+                # 단사 슬러그가 남기는 유일한 다툼은 대소문자만 다른 라벨이다
+                # — 파일시스템이 둘을 한 이름으로 보기 때문이고, 이건 이름
+                # 규칙이 아니라 저장소의 제약이다. 순번 대신 지문을 붙여
+                # 적어도 몇 번째 시도인지에는 기대지 않는다.
+                slug = f"{slug}-{_label_digest(slug)}"
             used.add(slug.casefold())
             paths[label] = ent_dir / f"{slug}.md"
             notes_sources[label] = source

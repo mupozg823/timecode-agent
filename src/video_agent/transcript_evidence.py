@@ -50,7 +50,14 @@ def _spans_overlap(
 
 def load_transcript_segment_index(ws: Workspace) -> TranscriptSegmentIndex:
     """Index valid transcript spans by stable segment identity."""
-    raw = load_json(ws.transcript_path)
+    return transcript_segment_index_from_value(load_json(ws.transcript_path))
+
+
+def transcript_segment_index_from_value(
+    raw: CheckpointValue,
+) -> TranscriptSegmentIndex:
+    """이미 읽어 둔 transcript JSON에서 인덱스를 만든다 — 한 스냅샷을 여러
+    소비자가 공유해야 같은 상태 위에서 판정하고 판독도 1회로 남는다."""
     if not isinstance(raw, list):
         return {}
 

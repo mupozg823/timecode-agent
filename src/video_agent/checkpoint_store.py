@@ -315,6 +315,35 @@ def load_checkpoint_history(ws: Workspace) -> list[CheckpointObject]:
         return history
 
 
+def load_checkpoint_history_with_entries(
+    ws: Workspace,
+) -> tuple[list[CheckpointObject], list[_IndexedCheckpoint]]:
+    """한 번의 판독으로 전체 이력과 최신 상태를 함께 돌려준다.
+
+    감사 경로가 이력(리플레이)과 스냅샷(상태)을 따로 읽으면 원장 1회 판독
+    계약이 깨지고, 동시 기입 시 두 뷰가 서로 다른 원장을 본다.
+    """
+    with _checkpoint_lock(ws, exclusive=False):
+        if not ws.checkpoints_path.is_file():
+            _CHECKPOINT_CACHE[ws] = (None, {}, 0, True)
+            return [], []
+        contents = ws.checkpoints_path.read_bytes()
+        lines = contents.splitlines()
+        by_id: dict[str, _IndexedCheckpoint] = {}
+        history: list[CheckpointObject] = []
+        _apply_checkpoint_lines(
+            ws, lines, by_id, first_lineno=1, history=history
+        )
+        ordered = sorted(by_id.values(), key=lambda item: item[0].span[0])
+        _CHECKPOINT_CACHE[ws] = (
+            _checkpoint_signature(ws),
+            by_id,
+            len(lines),
+            not contents or contents.endswith(b"\n"),
+        )
+        return history, ordered
+
+
 def _load_checkpoint_entries(ws: Workspace) -> list[_IndexedCheckpoint]:
     with _checkpoint_lock(ws, exclusive=False):
         return _load_checkpoint_entries_unlocked(ws)

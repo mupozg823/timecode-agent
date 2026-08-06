@@ -337,10 +337,10 @@ provenance·시퀀스를 쓸 수는 없다. 증거를 추가하려면 새 ingest
 
 | 계열 | 명령 |
 |---|---|
-| Ingest와 코퍼스 | `ingest` `glossary` `audit` `search` `index` `view` `wiki` `bridge` `gc` |
+| Ingest와 코퍼스 | `ingest` `glossary` `audit` `rebind` `search` `index` `view` `wiki` `skillgen` `bridge` `gc` |
 | Placement와 검사 | `brief` `capture` `keyframes` `audioevents` `diarize` `faces` `ocr` `filmstrip` `highlights` `scenes` |
-| 이해 상태 | `checkpoint add/list` `status` |
-| 편집과 납품 | `sequence add/list` `boundary-eval` `clip` `export` `reframe` |
+| 이해 상태 | `checkpoint add/list/observe` `ask` `status` |
+| 편집과 납품 | `sequence add/list` `boundary-eval` `beats` `beat-eval` `clip` `export` `reframe` |
 | 런타임과 설정 | `runtime` |
 
 같은 CLI를 `va`와 `tca` 두 이름으로 쓸 수 있다.
@@ -357,9 +357,43 @@ provenance·시퀀스를 쓸 수는 없다. 증거를 추가하려면 새 ingest
   쓴다. 체크포인트나 다른 전사 의존 증거를 기록하기 전에 실행하라.
   diarize는 transcript revision을 전진시키며, 그런 증거가 생긴 뒤에는
   거부된다.
+- `va checkpoint observe <workspace> --id <id> --frame <frames/...jpg>
+  --subject "앉아 있던 남자" --state present|absent|uncertain --hypothesis "..."`는
+  질의로 고른 provenance 추적·비크롭 프레임 하나를 타입이 있는
+  `person_presence` 체크포인트로 기록한다. 관찰 타임스탬프와 일치하는
+  `visual_evidence` 경로는 프레임에서 파생한다. 프레임만으로 재실 여부를
+  해결하지 못하면 `uncertain`을 써야 하며, 관찰은 hypothesized로 남는다.
+- `va ask <workspace> "앉아 있던 남자가 화면 밖으로 몇 번 나갔나요?"`는
+  이 한 가지 사건 횟수 의도의 자연스러운 한국어 변형과 좁은 영어 표현을
+  받는다. 결정론적 판독기는 타입이 있는 `person_presence` 관찰과 현재
+  provenance에 추적된 전체 해상도 프레임을 읽는다. 검증된 이탈과 불확실
+  구간은 분리하며, 대상·행동·횟수 표현이 모호하면 구체적인 진단으로
+  거부한다. 기본 `--format human --lang auto`는 한국어 질문에는 한국어,
+  영어 질문에는 영어로 렌더하고 `--lang ko|en`이 이를 덮어쓴다.
+  `--format agent-json`은 한 번 계산한 같은 envelope를 영어 식별자·사유
+  코드의 compact JSON으로 투영한다. 정규화한 `reply_locale`(예:
+  `ja-JP` → `ja`)을 보존해 host LLM이 사람용 산문을 다시 파싱하지 않고
+  현지화할 수 있게 한다. CLI 자체는 LLM을 호출하거나 번역하지 않는다.
+  `va ask`는 읽기 전용이며 체크포인트와 이미지 provenance를 추가하거나
+  다시 쓰지 않는다. 근거 부족은 0회 또는 이탈 없음의 증명이 아니다.
+
+```bash
+va ask va-out/clip "앉아 있던 남자가 화면 밖으로 몇 번 나갔나요?"
+va ask va-out/clip "how many times did the seated man leave the screen?" --lang en
+va ask va-out/clip "how many times did the seated man leave the screen?" \
+  --format agent-json --lang ja-JP
+```
+
+```json
+{"v":1,"intent":"person_exit_count","subject":"seated_man","reply_locale":"ja","status":"partial","count":1,"verified":[{"from_ms":12000,"to_ms":18000,"evidence":["frames/frame-000012.000.jpg","frames/frame-000018.000.jpg"]}],"uncertain":[{"from_ms":0,"to_ms":12000,"code":"UNOBSERVED_PREFIX"},{"from_ms":18000,"to_ms":30000,"code":"UNOBSERVED_SUFFIX"}],"next_ms":[6000,24000]}
+```
 - `boundary-eval`은 기록된 시퀀스의 컷 지점과 조인(발화 절단·호흡·
   음량 단차)을 채점해, 리뷰 후가 아니라 내보내기 전에 편집을 다시
   스냅할 수 있게 한다.
+- `beats`는 음원에서 고정 템포 비트 그리드(beats.json)를 추출하고,
+  `beat-eval`은 시퀀스의 출력 타임라인 조인을 그 그리드에 대조해
+  게이트한다(p90 오프셋 <= 40ms). `--snap`은 모든 조인을 비트 위에
+  앉히는 span 제안을 출력한다.
 
 ### 옵션 레퍼런스
 
@@ -382,7 +416,7 @@ argparse 또는 유효 런타임 기본값이며 문서상의 추측이 아니�
 | `ingest` | `--signals` | 꺼짐 | highlights + scenes까지 계산하고 brief 출력(세션 시작 1콜) |
 | `glossary` | `workspaces`(위치 인자) | 현재 상태 출력 | 갱신할 워크스페이스; 생략하면 조회만 |
 | `glossary` | `--all` | 꺼짐 | `./va-out` 아래 모든 워크스페이스에서 정정 수집 |
-| `audit`, `search`, `index`, `view`, `wiki` | `roots`(위치 인자) | `./va-out` | 하나의 코퍼스 루트, 또는 명시적 공통 루트를 공유하는 워크스페이스들 |
+| `audit`, `search`, `index`, `view`, `wiki`, `skillgen` | `roots`(위치 인자) | `./va-out` | 하나의 코퍼스 루트, 또는 명시적 공통 루트를 공유하는 워크스페이스들 |
 | `search` | `query`(위치 인자) | 필수 | 공백 구분 검색어, 접두 매치 |
 | `search` | `--top` | `10` | 최대 결과 수 |
 | `index` | `--graph-reset` | 꺼짐(없을 때만 생성) | Obsidian `.obsidian/graph.json` 표시 프리셋을 내장 기본값으로 덮어쓰기 |
@@ -439,6 +473,10 @@ argparse 또는 유효 런타임 기본값이며 문서상의 추측이 아니�
 |---|---|---|---|
 | `checkpoint add` | `--json` / `--json-file` | — | 체크포인트 객체를 JSON 문자열 / 파일 경로로(`-`는 stdin) |
 | `checkpoint add` | `--id` / `--span` / `--status` / `--hypothesis` / `--confidence` / `--segments` / `--visual-evidence` / `--note` | — | JSON 대신 플래그로 체크포인트를 구성한다. 두 입력 경로를 섞으면 거부되며, 명시적으로 빈 값도 마찬가지다 |
+| `checkpoint observe` | `--id` / `--frame` / `--subject` / `--state` / `--hypothesis` | 필수 | 추적된 비크롭 단일 시점 프레임 하나를 타입이 있는 `person_presence` 체크포인트에 결속한다. 해결되지 않은 프레임은 `uncertain`으로 hypothesized 상태에 둔다 |
+| `ask` | `workspace`, `question`(위치 인자) | 필수 | 구조화 체크포인트 관찰과 추적된 타임스탬프 프레임에서 앉은 사람의 화면 이탈 횟수만 좁고 읽기 전용으로 판독 |
+| `ask` | `--lang` | `auto` | 한국어 질문이면 `ko`, 그 밖은 `en`으로 추론하거나 명시한 BCP-47 기본 언어 태그를 정규화한다. 직접 human 렌더는 `ko`와 `en`을 지원 |
+| `ask` | `--format` | `human` | 현지화한 사람용 텍스트 또는 영어 식별자와 host-LLM 현지화용 `reply_locale`을 담은 compact `agent-json` |
 | `checkpoint list`, `status` | `--json` | 꺼짐 | 기계 판독 출력 |
 
 </details>
@@ -453,6 +491,13 @@ argparse 또는 유효 런타임 기본값이며 문서상의 추측이 아니�
 | `boundary-eval` | `-t`(반복 가능) | — | 즉석에서 채점할 컷 지점 |
 | `boundary-eval` | `--sequence` | — | 기록된 시퀀스의 컷·조인 채점 |
 | `boundary-eval` | `--window` | `0.4` | 각 경계 주변 오디오 창(초) |
+| `beats` | `--seconds` | 전체 길이 | 앞에서부터 N초만 분석 |
+| `beats` | `--out` | `<media>.beats.json` | 비트 그리드 아티팩트 경로 |
+| `beat-eval` | `--beats` | 필수 | `va beats`가 만든 beats.json |
+| `beat-eval` | `--sequence` | 필수 | 게이트할 시퀀스 id |
+| `beat-eval` | `--gate-ms` | `40` | p90 조인-비트 허용 오프셋(ms) |
+| `beat-eval` | `--snap` | 꺼짐 | 비트 스냅 span 제안 출력 |
+| `skillgen` | `--route` | 꺼짐 | 컴파일 없이 태스크별 게이트 상태 |
 | `clip` | `--start`, `--end` | 필수 | 클립 경계 |
 | `clip` | `-o`, `--output` | — | `clips/` 안의 파일명 |
 | `clip` | `--accurate` | 꺼짐(스트림 카피) | 정확한 경계를 위한 재인코딩 |
@@ -543,9 +588,10 @@ manifest는 `asr_backend`도 남긴다 — 채택된 전사를 만든 백엔드
 - URL ingest에는 `yt-dlp`
 - 포함된 Agent Skill을 발견할 수 있는 코딩 에이전트 하네스
 - 인터페이스 언어: 혼재한다. `--help` 문자열은 대부분 영어이고, 진단과
-  `va brief`/`va status` 요약, `va view` UI는 한국어다. 로케일 전환 수단은
-  없다. 원장과 인계물은 당신이 적어 넣은 언어로 말한다 —
-  [참고](#참고) 참조.
+  `va brief`/`va status` 요약, `va view` UI는 한국어다. 전역 로케일 전환은
+  없다. 좁은 `va ask` 표면만 예외로, 결정론적 human 출력은 한국어·영어를
+  지원하고 `agent-json`은 그 밖의 답변 로케일을 host LLM에 전달한다.
+  원장과 인계물은 당신이 적어 넣은 언어로 말한다 — [참고](#참고) 참조.
 - Windows는 실험 지원: 코어 CLI·원장·워크스페이스 락이 동작하고(공유
   락은 `msvcrt`로 배타 강등), CI 스모크 잡이 설치 → import → 락
   왕복 → CLI 기동을 검사하며, Apple 계열 큐(OCR·얼굴·의미 오디오
@@ -745,7 +791,10 @@ readiness 상태, 그리고 하드웨어 순위가 아니라 회귀를 잡기 �
 
 - 언어는 혼재하고, 인계물은 당신의 언어를 물려받는다. `--help`
   문자열의 약 3분의 2는 영어이고, 진단과 `va brief`/`va status` 요약,
-  `va view` UI는 한국어다. 로케일 전환은 구현돼 있지 않다.
+  `va view` UI는 한국어다. 전역 로케일 전환은 구현돼 있지 않다.
+  `va ask`만 좁은 이중 표면을 갖는다. 직접 human 출력은 한국어·영어
+  질문 감지(또는 `--lang ko|en`)를 따르고, compact `agent-json`은 다른
+  요청 답변 로케일을 host LLM에 보존해 전달한다. 자체 번역은 하지 않는다.
   타임스탬프와 구조 필드는 언어 중립이지만 산문은 아니다 — `srt`는 전사
   텍스트를 담고, `md`는 체크포인트 가설을 렌더하며,
   `edl`·`xml`·`fcpxml`·`otio`는 체크포인트의 `situation` 또는

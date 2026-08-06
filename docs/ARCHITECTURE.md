@@ -1,6 +1,6 @@
 # Architecture
 
-Last verified: 2026-07-27 against the current checkout.
+Last verified: 2026-08-06 against the current checkout.
 
 TIMECODE-AGENT is one Python runtime with one current policy skill and two
 physically separate append-only ledgers. The precise status is a
@@ -24,7 +24,7 @@ flowchart TB
     S --> CLI["va / tca CLI"]
 
     CLI --> M["media and placement<br/>ingest · capture · scenes · audio · OCR · faces"]
-    CLI --> U["understanding state<br/>checkpoint · status · audit"]
+    CLI --> U["understanding state<br/>checkpoint · ask · status · audit"]
     CLI --> E["edit-decision state<br/>sequence · boundary checks"]
     CLI --> D["delivery<br/>clip · export · reframe"]
     CLI --> C["corpus views<br/>search · index · view · wiki"]
@@ -68,6 +68,8 @@ sequence ledger and never writes facts back into P2.
 | Transcript projection boundary | `transcript_segments.py` | keeps valid finite ordered segments from a top-level array while brief/search/index/wiki/view/keyframe/diarization/SRT surfaces skip malformed members |
 | Workspace and ledger locking | `workspace_lock.py`, `workspace.py`, `cli.py` | shared operation leases except the exclusive diarization transcript-revision transition, one frozen leased corpus snapshot per command, inode-deduplicated aliases, stable sidecars and a read-only directory-inode fallback for legacy workspaces |
 | Understanding ledger | `checkpoint_schema.py`, `checkpoint_store.py`, `checkpoints.py` | locked append-only claim history and latest-revision projection |
+| Person-presence observation writer | `person_presence.py`, `cli_commands_workspace.py::cmd_checkpoint_observe` | binds one tracked, uncropped point frame to a typed observation; unresolved states stay hypothesized |
+| Question read model | `ask.py`, `ask_types.py`, `ask_locale.py`, `ask_render.py`, `ask_serialization.py`, `cli_ask_parser.py`, `cli_commands_workspace.py::cmd_ask` | calculates one deterministic, read-only `AskEnvelope` from structured person-presence evidence, then projects Korean/English human text or compact English-coded agent JSON without recomputing evidence |
 | Grounding and readiness | `verification.py`, `status.py`, `corpus_audit.py` | resolvable support checks, time overlap and advisory readiness |
 | Image provenance | `image_model.py`, `image_store.py`, `image_catalog.py` | capture identity, cause and timestamp relations |
 | Edit ledger | `sequence_schema.py`, `sequence_store.py`, `sequence_grounding.py` | ordered trims, forward-only states and checkpoint grounding |
@@ -84,6 +86,28 @@ sequence ledger and never writes facts back into P2.
 | `sequences.jsonl` | edit decisions | append-only workspace-revision-bound records in forward-only edit states |
 | index, HTML view and exports | derived surfaces | rebuildable from authoritative inputs |
 | wiki `tca:notes` and scene-log narrative | authored exception | preserved from existing files; not yet replayed from a ledger |
+
+`va checkpoint observe` binds one agent-selected, provenance-tracked, uncropped
+point frame to a typed `person_presence` checkpoint. It derives the timestamp
+and matching evidence path; `present` and `absent` are verified while
+`uncertain` remains hypothesized.
+
+`va ask` routes only the seated-man screen-departure count intent, including
+natural Korean variants; ambiguous subjects, actions, or count requests are
+rejected before evidence is read. It calculates one canonical `AskEnvelope`
+from typed observations and full-resolution timestamped frames tracked to the
+current workspace revision. Korean and English human renderers localize that
+envelope. Compact `agent-json` instead carries English identifiers/reason codes
+and a normalized `reply_locale`, so the host LLM can answer in another user
+language without parsing human prose. The runtime does not invoke an LLM or a
+translation service, and neither projection recalculates the evidence.
+
+The command never appends or rewrites checkpoints or image provenance. Point
+observations under half-open spans cannot prove continuous whole-video
+coverage, so the envelope is `partial` or `unobserved`, never a fabricated
+complete result. Uncertain intervals and equal-bin midpoint inspection
+suggestions stay separate from the verified count; zero verified departures is
+not proof that no departure occurred.
 
 New workspaces create `.workspace.lock`, `.checkpoint.lock`,
 `.image-provenance.lock`, and `.sequences.lock` before the manifest is
@@ -122,8 +146,10 @@ through filesystem aliases before re-entrancy checks, so aliases to the same
 inode cannot bypass an active lock.
 
 Historical unbound ledgers remain readable, but their workspaces reject new
-checkpoint, image-provenance, and sequence writes until an explicit migration
-or fresh ingest. A current-version draft created directly through the Python
+checkpoint, image-provenance, and sequence writes. There is no migration
+command; a fresh ingest into a new `-o` path is the only way to resume the
+understanding loop on that source. `va audit` reports how many workspaces are
+in this state, because a corpus can be frozen without any surface saying so. A current-version draft created directly through the Python
 API binds its current source, transcript, and timing on its first evidence
 write.
 
@@ -174,6 +200,12 @@ a wrong claim, the checkpoint is corrected upstream and the edit is
 re-derived. This is a logical write boundary; caller-specific capability
 enforcement is not implemented yet.
 
+Two deterministic gates extend this boundary: `va beat-eval` checks every
+output-timeline join of a sequence against a `va beats` beat grid
+(p90 offset <= 40 ms) without writing anything, and skill promotion from
+recurring procedures requires tool-coherent sources — `va skillgen --route`
+reports, per task, which gate still blocks promotion.
+
 Self-reported model confidence is not a stopping proof. The policy stops only
 when decision-critical claims have current support, relevant audit warnings
 and contradictions are resolved or explicitly qualified, and another
@@ -192,7 +224,7 @@ inspection is unlikely to change the answer within the remaining budget.
 | half-open stream PTS dual-write; full decoded-CFR cadence proof before revision-bound NLE handoff | persisted decoded-frame index/snapping and VFR NLE export |
 | append-only image/capture provenance | W3C PROV serialization or C2PA signing |
 | EDL, FCPXML, OTIO, SRT and Markdown delivery | universal NLE compatibility guarantee |
-| on-demand FTS5 corpus search and Markdown/HTML/wiki views | persistent vector database or mandatory query router |
+| incrementally synced FTS5 corpus search (word+trigram) and Markdown/HTML/wiki views | persistent vector database or mandatory query router |
 | deterministic cut-boundary measurements and advisory flags | viewer attention, working-memory or surprise estimator |
 
 ## Operating boundaries
